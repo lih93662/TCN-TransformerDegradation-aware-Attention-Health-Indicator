@@ -4,25 +4,53 @@ A research-oriented PyTorch implementation for Remaining Useful Life (RUL) predi
 
 ## Architecture
 
-This repository implements the required hybrid model:
+This repository implements a modular hybrid model family:
 
-- **Temporal Convolutional Network (TCN)** for local temporal feature extraction.
-- **Transformer Encoder** for global sequence dependency learning.
+- **Temporal Convolutional Network (TCN)** for local temporal features.
+- **Transformer Encoder** for global sequence modeling.
 - **Degradation-Aware Attention** with HI-conditioned temporal bias.
-- **Health Indicator (HI)** learned from statistical vibration features (RMS, variance, kurtosis, skewness).
-- **Fusion + Regression Head** for final RUL prediction.
+- **Health Indicator (HI)** learned from statistical vibration features.
+- **Multimodal Attention Fusion** across time/frequency/deep/HI features.
+
+## Advanced Modules Added
+
+- `src/features/time_frequency.py`
+  - STFT feature extraction
+  - CWT feature extraction
+  - Time-frequency fusion/projector utilities
+- `src/data/data_augmentation.py`
+  - Gaussian noise
+  - Time warping
+  - Window slicing
+  - Mixup
+- `src/models/multimodal_fusion.py`
+  - Attention-based multimodal fusion
+  - HI-conditioned modality weighting
+  - Fusion interpretability outputs
+- `scripts/online_prediction.py`
+  - Online/streaming RUL simulation pipeline
+- `scripts/run_benchmark.py`
+  - Multi-model benchmark experiments and CSV export
+- `scripts/generate_paper_figures.py`
+  - Publication-style figure generation under `outputs/paper_figures/`
 
 ## Folder Structure
 
 ```text
 rul_prediction_project/
 ├── src/
+│   ├── data/
+│   ├── features/
+│   ├── models/
+│   └── ...
 ├── configs/
 ├── scripts/
 ├── outputs/
 │   ├── checkpoints/
 │   ├── figures/
-│   └── logs/
+│   ├── logs/
+│   ├── paper_figures/
+│   └── results/
 ├── requirements.txt
 └── README.md
 ```
@@ -43,40 +71,46 @@ The dataset is read directly from this location. No dataset duplication is perfo
 python scripts/train.py --config configs/config.yaml
 ```
 
-This will:
-
-1. Prepare standardized sliding windows (`window_size=40`, `stride=1`).
-2. Train for 50 epochs with Adam (`lr=3e-4`, `batch_size=64`).
-3. Save best checkpoint to `outputs/checkpoints/best_model.pth`.
-4. Save logs/metrics and generate training loss plot.
-
 ## Evaluation
 
 ```bash
 python scripts/evaluate.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth
 ```
 
-Metrics:
-
-- RMSE
-- MAE
-- PHM 2012 Score
-
-## Plotting
+## Benchmark
 
 ```bash
-python scripts/plot_results.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth
+python scripts/run_benchmark.py --config configs/config.yaml
 ```
 
-Generated figures:
+Outputs:
 
-- `training_loss_curve.png`
-- `rul_prediction_curve.png`
+- `outputs/results/benchmark_results.csv`
+
+## Online Prediction
+
+```bash
+python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_file /path/to/new_signal.csv
+```
+
+## Paper Figures
+
+```bash
+python scripts/generate_paper_figures.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth
+```
+
+Generated files in `outputs/paper_figures/`:
+
+- `model_architecture.png`
 - `health_indicator_curve.png`
-- `example_bearing_prediction.png`
+- `rul_prediction_curve.png`
+- `attention_heatmap.png`
+- `sensor_importance.png`
+- `ablation_results.png`
 
 ## Notes
 
 - GPU is automatically used if available.
-- All modules include type hints and docstrings.
-- Reproducible seed setup is integrated.
+- Random seed setup is integrated.
+- Checkpoint saved as `outputs/checkpoints/best_model.pth`.
+- Metrics include RMSE, MAE, and PHM score.

@@ -25,4 +25,7 @@ __all__ = [
     "evaluator",
     "visualization",
     "utils",
+    "features",
+    "data",
+    "models",
 ]
