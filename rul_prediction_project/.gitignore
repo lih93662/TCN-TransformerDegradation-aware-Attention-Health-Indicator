@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+outputs/checkpoints/*.pth
+outputs/logs/*.log
+outputs/logs/*.json
+outputs/figures/*.png

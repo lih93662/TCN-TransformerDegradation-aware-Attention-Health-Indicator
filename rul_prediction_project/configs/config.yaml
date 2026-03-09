@@ -1,0 +1,26 @@
+experiment:
+  name: tcn_transformer_degradation_attention_hi
+  seed: 42
+
+data:
+  dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
+  window_size: 40
+  stride: 1
+  max_rul: 125
+  valid_ratio: 0.2
+
+model:
+  tcn_channels: 64
+  tcn_kernel_size: 3
+  tcn_dilations: [1, 2, 4, 8]
+  transformer_embed_dim: 128
+  transformer_heads: 4
+  transformer_layers: 2
+  transformer_ffn_dim: 256
+  dropout: 0.1
+
+train:
+  lr: 0.0003
+  batch_size: 64
+  epochs: 50
+  num_workers: 0
