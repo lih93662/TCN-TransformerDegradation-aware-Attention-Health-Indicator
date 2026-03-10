@@ -1,15 +1,14 @@
 """Dataset definitions for PHM 2012 bearing RUL prediction.
 
-This module contains:
-1. Filesystem discovery utilities for PHM2012 challenge files.
-2. In-memory indexing of bearing run-to-failure sequences.
-3. Sliding window conversion for sequence-to-one regression.
-4. PyTorch ``Dataset`` classes for train/test subsets.
+PHM2012 storage layout note (critical):
+- A *bearing run* is represented by a directory containing many CSV/TXT
+  vibration segments.
+- Each segment file is one slice of the same run, not an independent run.
+- Therefore, files inside one bearing directory must be sorted and concatenated
+  into a single continuous time-series.
 
-Important preprocessing design note:
-PHM2012 mirrors can expose different sensor *column names* between files.
-To avoid schema coupling, downstream preprocessing should select channels by
-position (first N numeric sensor columns) rather than relying on name overlap.
+This module implements that behavior to avoid exploding sample counts from
+incorrect file-level run interpretation.
 """
 
 from __future__ import annotations
@@ -35,8 +34,8 @@ class BearingRun:
 
     Attributes:
         bearing_id: Canonical identifier for the run.
-        split: Dataset split name (``Learning_set`` / ``Test_set``).
-        frame: Numeric dataframe sorted by cycle.
+        split: Dataset split name (``Learning_set`` / ``Test_set`` / ``Unknown``).
+        frame: Numeric dataframe sorted by continuous cycle.
     """
 
     bearing_id: str
@@ -50,11 +49,7 @@ class BearingRun:
 
     @property
     def sensor_columns(self) -> List[str]:
-        """Return candidate numeric sensor columns excluding cycle/time.
-
-        The order of columns is preserved from the source file to support
-        position-based channel selection in preprocessing.
-        """
+        """Return candidate numeric sensor columns excluding cycle/time."""
 
         cols: List[str] = []
         for c in self.frame.columns:
@@ -65,73 +60,142 @@ class BearingRun:
         return cols
 
 
-def discover_bearing_files(root: Path) -> Dict[str, List[Path]]:
-    """Discover CSV/TXT files inside PHM2012 dataset folder."""
+def _detect_split_from_path(path: Path) -> str:
+    """Infer split label from path parts."""
+
+    parts = [p.lower() for p in path.parts]
+    if "learning_set" in parts:
+        return "Learning_set"
+    if "test_set" in parts:
+        return "Test_set"
+    return "Unknown"
+
+
+def discover_bearing_run_dirs(root: Path) -> Dict[str, List[Path]]:
+    """Discover bearing run directories (not individual files).
+
+    Returns:
+        Mapping from split name to sorted list of run directories.
+
+    Algorithm:
+    - Scan all CSV/TXT files.
+    - Use each file's parent directory as a run directory.
+    - Group unique directories by split.
+    """
 
     if not root.exists():
         raise FileNotFoundError(f"Dataset path not found: {root}")
 
-    candidates = list(root.rglob("*.csv")) + list(root.rglob("*.txt"))
-    split_to_files: Dict[str, List[Path]] = {}
-    for file in candidates:
-        parent_parts = [p.lower() for p in file.parts]
-        if "learning_set" in parent_parts:
-            split = "Learning_set"
-        elif "test_set" in parent_parts:
-            split = "Test_set"
-        else:
-            split = "Unknown"
-        split_to_files.setdefault(split, []).append(file)
+    files = list(root.rglob("*.csv")) + list(root.rglob("*.txt"))
+    split_to_dirs: Dict[str, set[Path]] = {}
 
-    for key in split_to_files:
-        split_to_files[key] = sorted(split_to_files[key])
+    for f in files:
+        run_dir = f.parent
+        split = _detect_split_from_path(f)
+        split_to_dirs.setdefault(split, set()).add(run_dir)
 
-    return split_to_files
+    out: Dict[str, List[Path]] = {}
+    for split, dirs in split_to_dirs.items():
+        out[split] = sorted(dirs)
+    return out
 
 
-def _read_table(path: Path) -> pd.DataFrame:
-    """Read one bearing file with robust delimiter handling."""
+def _read_segment_file(path: Path) -> pd.DataFrame:
+    """Read one vibration segment file into numeric dataframe.
+
+    The returned frame may still contain varying column names between files;
+    alignment is handled during run-level concatenation by position.
+    """
 
     if path.suffix.lower() == ".csv":
         frame = pd.read_csv(path)
     else:
         frame = pd.read_csv(path, sep=None, engine="python")
 
-    lowered = {c.lower(): c for c in frame.columns}
-    if "cycle" not in lowered:
-        frame.insert(0, "cycle", np.arange(1, len(frame) + 1, dtype=np.int32))
-    elif lowered.get("cycle") != "cycle":
-        frame = frame.rename(columns={lowered["cycle"]: "cycle"})
+    # Keep only numeric columns to avoid accidental text/meta fields.
+    num_cols = [c for c in frame.columns if np.issubdtype(frame[c].dtype, np.number)]
+    frame = frame[num_cols].copy()
 
-    numeric_cols = [c for c in frame.columns if np.issubdtype(frame[c].dtype, np.number)]
-    if "cycle" not in numeric_cols:
-        numeric_cols = ["cycle"] + numeric_cols
-    frame = frame[numeric_cols].copy()
-    frame = frame.sort_values("cycle").reset_index(drop=True)
+    # Drop legacy cycle/time columns if present in segment files. The run-level
+    # continuous cycle index is rebuilt after concatenation.
+    drop_cols = [c for c in frame.columns if str(c).lower() in {"cycle", "time"}]
+    if drop_cols:
+        frame = frame.drop(columns=drop_cols)
+
+    frame = frame.reset_index(drop=True)
     return frame
 
 
-def _bearing_id_from_path(path: Path) -> str:
-    stem = path.stem
-    for prefix in ["Bearing", "bearing", "acc", "vibration"]:
-        stem = stem.replace(prefix, "")
-    return path.parent.name + "_" + stem
+def _load_run_from_directory(run_dir: Path) -> pd.DataFrame:
+    """Load all segment files under one run directory and concatenate.
+
+    Args:
+        run_dir: Path to one bearing run directory.
+
+    Returns:
+        Concatenated dataframe with standardized sensor names and continuous
+        ``cycle`` index starting at 1.
+    """
+
+    seg_files = sorted([*run_dir.glob("*.csv"), *run_dir.glob("*.txt")], key=lambda p: p.name)
+    if not seg_files:
+        raise RuntimeError(f"No segment files in run directory: {run_dir}")
+
+    seg_frames: List[pd.DataFrame] = []
+    for f in seg_files:
+        seg = _read_segment_file(f)
+        if len(seg) == 0 or seg.shape[1] == 0:
+            continue
+        seg_frames.append(seg)
+
+    if not seg_frames:
+        raise RuntimeError(f"No usable numeric segment data in: {run_dir}")
+
+    # PHM mirrors can have slight segment schema drift; align by position using
+    # the minimum shared channel count across segment files.
+    shared_dim = min(seg.shape[1] for seg in seg_frames)
+    if shared_dim < 1:
+        raise RuntimeError(f"No shared sensor channels found in: {run_dir}")
+
+    normalized_segments: List[pd.DataFrame] = []
+    sensor_names = [f"sensor_{i}" for i in range(shared_dim)]
+    for seg in seg_frames:
+        part = seg.iloc[:, :shared_dim].copy()
+        part.columns = sensor_names
+        normalized_segments.append(part)
+
+    run_frame = pd.concat(normalized_segments, axis=0, ignore_index=True)
+    run_frame.insert(0, "cycle", np.arange(1, len(run_frame) + 1, dtype=np.int32))
+    return run_frame
+
+
+def _bearing_id_from_dir(run_dir: Path) -> str:
+    """Build deterministic run id from directory path."""
+
+    parent = run_dir.parent.name
+    return f"{parent}_{run_dir.name}"
 
 
 def load_all_bearings(dataset_root: Path) -> List[BearingRun]:
-    """Load every detected bearing run as ``BearingRun``."""
+    """Load PHM2012 runs by bearing directory.
 
-    files = discover_bearing_files(dataset_root)
+    Important:
+        This function creates exactly one ``BearingRun`` per run directory,
+        preventing the massive sample inflation caused by file-level runs.
+    """
+
+    split_dirs = discover_bearing_run_dirs(dataset_root)
     runs: List[BearingRun] = []
-    for split, split_files in files.items():
-        for file in split_files:
+
+    for split, dirs in split_dirs.items():
+        for run_dir in dirs:
             try:
-                frame = _read_table(file)
+                frame = _load_run_from_directory(run_dir)
                 if len(frame) < 2:
                     continue
                 runs.append(
                     BearingRun(
-                        bearing_id=_bearing_id_from_path(file),
+                        bearing_id=_bearing_id_from_dir(run_dir),
                         split=split,
                         frame=frame,
                     )
@@ -140,7 +204,7 @@ def load_all_bearings(dataset_root: Path) -> List[BearingRun]:
                 continue
 
     if not runs:
-        raise RuntimeError(f"No usable bearing files found under: {dataset_root}")
+        raise RuntimeError(f"No usable bearing runs found under: {dataset_root}")
     return runs
 
 
