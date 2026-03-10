@@ -1,21 +1,24 @@
 """Preprocessing pipeline for PHM2012 RUL learning.
 
-Responsibilities:
-- Build linear/clipped RUL targets per cycle.
-- Fit and apply standardization on sensor channels.
-- Construct sliding windows for supervised training.
-- Provide structured splits for trainer/evaluator modules.
+This module handles the complete conversion from run-level bearing signals to
+supervised sliding-window datasets.
 
-Design for inconsistent PHM2012 sensor headers:
-- We intentionally do NOT align channels by column name intersection.
-- Instead, each run uses the first ``sensor_dim`` numeric sensor columns in its
-  native column order.
-- Default ``sensor_dim=2`` targets common two-channel vibration data.
-- This strategy avoids empty-column intersections and scaler broadcasting errors.
+Key design goals implemented here:
+1. Stable/reproducible preprocessing.
+2. Robust handling of inconsistent PHM2012 sensor column names.
+3. Controlled dataset size for faster experiments.
+
+Dataset-size controls:
+- window_size defaults to 40.
+- stride defaults to 10.
+- max_rul defaults to 125.
+- max_windows_per_bearing defaults to 20000.
+- if windows exceed the cap, reproducible random subsampling is applied.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -34,7 +37,12 @@ from .dataset import (
 
 @dataclass
 class StandardScaler:
-    """Simple per-feature standardization helper."""
+    """Simple per-feature standardization helper.
+
+    Attributes:
+        mean_: Channel-wise mean with shape ``(sensor_dim,)``.
+        std_: Channel-wise std with shape ``(sensor_dim,)``.
+    """
 
     mean_: np.ndarray
     std_: np.ndarray
@@ -43,10 +51,10 @@ class StandardScaler:
         """Apply feature-wise standardization.
 
         Args:
-            x: Array of shape ``(n_samples, sensor_dim)``.
+            x: Input array with shape ``(num_samples, sensor_dim)``.
 
         Returns:
-            Standardized array with same shape.
+            Standardized array with the same shape.
         """
 
         return (x - self.mean_) / np.clip(self.std_, 1e-8, None)
@@ -54,7 +62,17 @@ class StandardScaler:
 
 @dataclass
 class PreparedData:
-    """Container returned by ``prepare_datasets``."""
+    """Container returned by ``prepare_datasets``.
+
+    Attributes:
+        train_dataset: Train split dataset.
+        valid_dataset: Validation split dataset.
+        test_dataset: Test split dataset.
+        scaler: Fitted global scaler from training runs.
+        feature_dim: Number of selected sensor channels.
+        detected_sensor_columns: Sensor column names selected from first
+            training run (for logging/traceability).
+    """
 
     train_dataset: PHM2012RULDataset
     valid_dataset: PHM2012RULDataset
@@ -69,70 +87,130 @@ def compute_linear_rul(cycles: np.ndarray, max_rul: int = 125) -> np.ndarray:
 
     Formula:
         RUL = max_cycle - current_cycle
-        RUL = min(RUL, max_rul)
+        RUL = clip(RUL, 0, max_rul)
+
+    Args:
+        cycles: Cycle index array with shape ``(num_cycles,)``.
+        max_rul: Maximum RUL clipping threshold.
+
+    Returns:
+        RUL array of shape ``(num_cycles,)``.
     """
 
     max_cycle = int(np.max(cycles))
     rul = max_cycle - cycles
-    rul = np.clip(rul, 0, max_rul)
-    return rul.astype(np.float32)
+    return np.clip(rul, 0, max_rul).astype(np.float32)
+
+
+def _stable_int_hash(text: str) -> int:
+    """Compute a stable positive integer hash for reproducible run sampling.
+
+    Args:
+        text: Input string.
+
+    Returns:
+        Deterministic integer hash.
+    """
+
+    h = hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return int(h[:8], 16)
 
 
 def _select_sensor_columns(run: BearingRun, sensor_dim: int) -> List[str]:
     """Select the first ``sensor_dim`` numeric sensor columns from one run.
 
+    We use position-based channel selection to avoid dependence on inconsistent
+    sensor names across PHM2012 mirrors.
+
     Args:
-        run: Bearing run object.
-        sensor_dim: Required number of channels.
+        run: Bearing run container.
+        sensor_dim: Number of channels to retain.
 
     Returns:
-        Selected column names in deterministic source order.
+        List of selected column names.
 
     Raises:
-        ValueError: If run does not have enough numeric sensor columns.
+        ValueError: If the run has fewer numeric columns than ``sensor_dim``.
     """
 
     candidates = run.sensor_columns
     if len(candidates) < sensor_dim:
         raise ValueError(
-            f"Run {run.bearing_id} has only {len(candidates)} sensor columns, "
+            f"Run {run.bearing_id} has {len(candidates)} sensor columns, "
             f"but sensor_dim={sensor_dim} is required."
         )
     return candidates[:sensor_dim]
 
 
 def fit_scaler(train_runs: Sequence[BearingRun], sensor_dim: int = 2) -> Tuple[StandardScaler, List[str]]:
-    """Fit a global scaler using training runs only.
+    """Fit a global channel-wise scaler from training runs only.
 
     Args:
-        train_runs: Training bearing runs.
-        sensor_dim: Number of channels to extract per run.
+        train_runs: Training run list.
+        sensor_dim: Number of selected channels per run.
 
     Returns:
-        Tuple ``(scaler, reference_sensor_columns)``.
+        Tuple ``(scaler, detected_sensor_columns)``.
 
-    Algorithm explanation:
-    - For each run, select first ``sensor_dim`` numeric sensor columns.
-    - Stack all selected channels from all training runs.
-    - Compute global mean/std for stable train/test normalization.
+    Algorithm:
+        1. Select first ``sensor_dim`` numeric columns per run.
+        2. Concatenate all train samples.
+        3. Compute mean/std per channel.
     """
 
     mats: List[np.ndarray] = []
-    ref_cols: List[str] = []
+    detected_cols: List[str] = []
 
     for i, run in enumerate(train_runs):
-        cols = _select_sensor_columns(run, sensor_dim=sensor_dim)
+        cols = _select_sensor_columns(run, sensor_dim)
         if i == 0:
-            ref_cols = cols
+            detected_cols = cols
         mats.append(run.frame[cols].to_numpy(dtype=np.float32))
 
     if not mats:
-        raise RuntimeError("No runs available to fit scaler.")
+        raise RuntimeError("No training runs available to fit scaler.")
 
     stacked = np.concatenate(mats, axis=0)
-    mean_ = np.mean(stacked, axis=0)
-    std_ = np.std(stacked, axis=0)
-    return StandardScaler(mean_=mean_.astype(np.float32), std_=std_.astype(np.float32)), ref_cols
+    mean_ = np.mean(stacked, axis=0).astype(np.float32)
+    std_ = np.std(stacked, axis=0).astype(np.float32)
+    return StandardScaler(mean_=mean_, std_=std_), detected_cols
+
+
+def _cap_windows_per_bearing(
+    x: np.ndarray,
+    y: np.ndarray,
+    bearing_id: str,
+    max_windows_per_bearing: int,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Cap window count for one bearing via reproducible random sampling.
+
+    Args:
+        x: Window tensor ``(num_windows, window_size, sensor_dim)``.
+        y: Label array ``(num_windows,)``.
+        bearing_id: Bearing identifier for deterministic per-run RNG.
+        max_windows_per_bearing: Maximum windows retained for this run.
+        seed: Global seed.
+
+    Returns:
+        Possibly subsampled ``(x, y)``.
+
+    Notes:
+        - If ``num_windows <= cap``, arrays are returned unchanged.
+        - Sampling is without replacement.
+        - Sorting sampled indices preserves chronological order after sampling,
+          improving temporal consistency for qualitative plotting.
+    """
+
+    num = x.shape[0]
+    if num <= max_windows_per_bearing:
+        return x, y
+
+    run_seed = seed + _stable_int_hash(bearing_id)
+    rng = np.random.default_rng(run_seed)
+    idx = rng.choice(num, size=max_windows_per_bearing, replace=False)
+    idx = np.sort(idx)
+    return x[idx], y[idx]
 
 
 def _runs_to_samples(
@@ -142,8 +220,27 @@ def _runs_to_samples(
     stride: int,
     max_rul: int,
     sensor_dim: int,
+    max_windows_per_bearing: int,
+    seed: int,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Convert run list into ``(X, y, ids)`` arrays with consistent sensor dimension."""
+    """Convert run list into supervised arrays with sample-size control.
+
+    Args:
+        runs: Bearing runs.
+        scaler: Global fitted scaler.
+        window_size: Sliding window length.
+        stride: Sliding stride.
+        max_rul: RUL clipping value.
+        sensor_dim: Number of selected channels.
+        max_windows_per_bearing: Per-run sample cap.
+        seed: Global reproducibility seed.
+
+    Returns:
+        Tuple ``(X, y, ids)`` where
+        - ``X`` has shape ``(N, window_size, sensor_dim)``
+        - ``y`` has shape ``(N,)``
+        - ``ids`` has length ``N``
+    """
 
     all_x: List[np.ndarray] = []
     all_y: List[np.ndarray] = []
@@ -171,6 +268,15 @@ def _runs_to_samples(
         )
         if x.shape[0] == 0:
             continue
+
+        x, y = _cap_windows_per_bearing(
+            x=x,
+            y=y,
+            bearing_id=run.bearing_id,
+            max_windows_per_bearing=max_windows_per_bearing,
+            seed=seed,
+        )
+
         all_x.append(x)
         all_y.append(y)
         all_ids.extend([run.bearing_id] * x.shape[0])
@@ -182,33 +288,33 @@ def _runs_to_samples(
             [],
         )
 
-    x_cat = np.concatenate(all_x, axis=0)
-    y_cat = np.concatenate(all_y, axis=0)
-    return x_cat, y_cat, all_ids
+    return np.concatenate(all_x, axis=0), np.concatenate(all_y, axis=0), all_ids
 
 
 def prepare_datasets(
     dataset_root: str | Path = DEFAULT_DATASET_PATH,
     window_size: int = 40,
-    stride: int = 1,
+    stride: int = 10,
     max_rul: int = 125,
     valid_ratio: float = 0.2,
     seed: int = 42,
     sensor_dim: int = 2,
+    max_windows_per_bearing: int = 20000,
 ) -> PreparedData:
-    """Prepare train/valid/test datasets from raw PHM2012 files.
+    """Prepare train/valid/test datasets from PHM2012 raw files.
 
     Args:
-        dataset_root: Root path to PHM2012 files.
-        window_size: Sliding window length.
-        stride: Sliding window stride.
-        max_rul: RUL clipping value.
+        dataset_root: PHM2012 root path.
+        window_size: Sliding window length (default 40).
+        stride: Sliding stride (default 10 for faster training).
+        max_rul: RUL clipping value (default 125).
         valid_ratio: Validation split ratio by run.
-        seed: Random seed for deterministic splitting.
-        sensor_dim: Number of sensor channels per run (default=2).
+        seed: Random seed.
+        sensor_dim: Number of channels (default 2).
+        max_windows_per_bearing: Window cap per run (default 20000).
 
     Returns:
-        ``PreparedData`` with consistent train/valid/test feature dimensions.
+        ``PreparedData`` object.
     """
 
     root = Path(dataset_root)
@@ -225,19 +331,40 @@ def prepare_datasets(
     scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim)
 
     x_train, y_train, id_train = _runs_to_samples(
-        train_runs, scaler, window_size, stride, max_rul, sensor_dim=sensor_dim
+        runs=train_runs,
+        scaler=scaler,
+        window_size=window_size,
+        stride=stride,
+        max_rul=max_rul,
+        sensor_dim=sensor_dim,
+        max_windows_per_bearing=max_windows_per_bearing,
+        seed=seed,
     )
     x_valid, y_valid, id_valid = _runs_to_samples(
-        valid_runs, scaler, window_size, stride, max_rul, sensor_dim=sensor_dim
+        runs=valid_runs,
+        scaler=scaler,
+        window_size=window_size,
+        stride=stride,
+        max_rul=max_rul,
+        sensor_dim=sensor_dim,
+        max_windows_per_bearing=max_windows_per_bearing,
+        seed=seed,
     )
     x_test, y_test, id_test = _runs_to_samples(
-        test_runs, scaler, window_size, stride, max_rul, sensor_dim=sensor_dim
+        runs=test_runs,
+        scaler=scaler,
+        window_size=window_size,
+        stride=stride,
+        max_rul=max_rul,
+        sensor_dim=sensor_dim,
+        max_windows_per_bearing=max_windows_per_bearing,
+        seed=seed,
     )
 
     if x_train.shape[0] == 0:
         raise RuntimeError("No training windows were generated. Check dataset structure.")
 
-    # Defensive check to ensure consistent train/test channel dimensions.
+    # Guard against silent shape drift between splits.
     if x_valid.size and x_valid.shape[-1] != x_train.shape[-1]:
         raise RuntimeError("Validation sensor dimension mismatch with training set.")
     if x_test.size and x_test.shape[-1] != x_train.shape[-1]:
@@ -258,10 +385,13 @@ def prepare_datasets(
 
 
 def summarize_dataset(prepared: PreparedData) -> Dict[str, object]:
-    """Return split statistics and detected channels for logging.
+    """Build compact summary dictionary for logs.
 
-    The ``detected_sensor_columns`` field is included so caller logs can clearly
-    print which sensor columns were selected during preprocessing.
+    Args:
+        prepared: Prepared data object.
+
+    Returns:
+        Dictionary with split counts and detected sensor metadata.
     """
 
     return {
