@@ -4,18 +4,19 @@ This module contains:
 1. Filesystem discovery utilities for PHM2012 challenge files.
 2. In-memory indexing of bearing run-to-failure sequences.
 3. Sliding window conversion for sequence-to-one regression.
-4. PyTorch `Dataset` classes for train/test subsets.
+4. PyTorch ``Dataset`` classes for train/test subsets.
 
-The implementation intentionally prefers explicit and well-documented behavior
-because research reproducibility and data leakage prevention are critical in
-prognostics pipelines.
+Important preprocessing design note:
+PHM2012 mirrors can expose different sensor *column names* between files.
+To avoid schema coupling, downstream preprocessing should select channels by
+position (first N numeric sensor columns) rather than relying on name overlap.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,8 +35,8 @@ class BearingRun:
 
     Attributes:
         bearing_id: Canonical identifier for the run.
-        split: Dataset split name (`Learning_set`, `Test_set`).
-        frame: DataFrame with one row per cycle and multiple sensor columns.
+        split: Dataset split name (``Learning_set`` / ``Test_set``).
+        frame: Numeric dataframe sorted by cycle.
     """
 
     bearing_id: str
@@ -49,23 +50,23 @@ class BearingRun:
 
     @property
     def sensor_columns(self) -> List[str]:
-        """Return all non-cycle sensor feature columns."""
-        return [c for c in self.frame.columns if c.lower() not in {"cycle", "time"}]
+        """Return candidate numeric sensor columns excluding cycle/time.
+
+        The order of columns is preserved from the source file to support
+        position-based channel selection in preprocessing.
+        """
+
+        cols: List[str] = []
+        for c in self.frame.columns:
+            if c.lower() in {"cycle", "time"}:
+                continue
+            if np.issubdtype(self.frame[c].dtype, np.number):
+                cols.append(c)
+        return cols
 
 
 def discover_bearing_files(root: Path) -> Dict[str, List[Path]]:
-    """Discover CSV/TXT files inside PHM2012 dataset folder.
-
-    The original PHM2012 release appears in multiple mirrored variants with
-    slight differences in folder naming and file formats. This utility uses
-    permissive discovery rules to maximize compatibility.
-
-    Args:
-        root: Dataset root path.
-
-    Returns:
-        Mapping from split-like folder names to candidate data files.
-    """
+    """Discover CSV/TXT files inside PHM2012 dataset folder."""
 
     if not root.exists():
         raise FileNotFoundError(f"Dataset path not found: {root}")
@@ -96,15 +97,15 @@ def _read_table(path: Path) -> pd.DataFrame:
     else:
         frame = pd.read_csv(path, sep=None, engine="python")
 
-    # Normalize basic index/cycle naming patterns.
     lowered = {c.lower(): c for c in frame.columns}
     if "cycle" not in lowered:
         frame.insert(0, "cycle", np.arange(1, len(frame) + 1, dtype=np.int32))
     elif lowered.get("cycle") != "cycle":
         frame = frame.rename(columns={lowered["cycle"]: "cycle"})
 
-    # Keep only numeric columns to avoid ID leakage/text fields.
     numeric_cols = [c for c in frame.columns if np.issubdtype(frame[c].dtype, np.number)]
+    if "cycle" not in numeric_cols:
+        numeric_cols = ["cycle"] + numeric_cols
     frame = frame[numeric_cols].copy()
     frame = frame.sort_values("cycle").reset_index(drop=True)
     return frame
@@ -118,14 +119,7 @@ def _bearing_id_from_path(path: Path) -> str:
 
 
 def load_all_bearings(dataset_root: Path) -> List[BearingRun]:
-    """Load every detected bearing run as `BearingRun`.
-
-    Args:
-        dataset_root: Root folder containing PHM2012 files.
-
-    Returns:
-        List of loaded runs.
-    """
+    """Load every detected bearing run as ``BearingRun``."""
 
     files = discover_bearing_files(dataset_root)
     runs: List[BearingRun] = []
@@ -143,7 +137,6 @@ def load_all_bearings(dataset_root: Path) -> List[BearingRun]:
                     )
                 )
             except Exception:
-                # Skip malformed files while preserving robust bulk loading.
                 continue
 
     if not runs:
@@ -157,18 +150,7 @@ def build_sliding_windows(
     window_size: int,
     stride: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert one bearing sequence into overlapping windows.
-
-    Args:
-        series: Array shaped (cycles, sensors).
-        rul: Array shaped (cycles,).
-        window_size: Number of timesteps per sample.
-        stride: Step between consecutive windows.
-
-    Returns:
-        windows: (num_windows, window_size, sensors)
-        labels: (num_windows,)
-    """
+    """Convert one bearing sequence into overlapping windows."""
 
     n_cycles = int(series.shape[0])
     if n_cycles < window_size:
@@ -183,10 +165,7 @@ def build_sliding_windows(
 
 
 class PHM2012RULDataset(Dataset):
-    """PyTorch dataset for PHM2012 bearing RUL prediction.
-
-    This dataset expects preprocessed and normalized windows.
-    """
+    """PyTorch dataset for PHM2012 bearing RUL prediction."""
 
     def __init__(self, features: np.ndarray, labels: np.ndarray, ids: Sequence[str]):
         self.features = torch.from_numpy(features).float()
