@@ -71,4 +71,11 @@ class HealthIndicatorNet(nn.Module):
         stat_feat = self.extractor(x)
         hi_logit = self.mlp(stat_feat)
         hi_score = self.out_act(hi_logit)
+
+        # Optional contrast normalization for training batches only.
+        if hi_score.size(0) > 1:
+            hi_min = hi_score.min(dim=0, keepdim=True).values
+            hi_max = hi_score.max(dim=0, keepdim=True).values
+            hi_score = (hi_score - hi_min) / (hi_max - hi_min + 1e-6)
+
         return hi_score, stat_feat

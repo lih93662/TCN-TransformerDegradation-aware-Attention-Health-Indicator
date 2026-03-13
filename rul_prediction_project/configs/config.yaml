@@ -24,3 +24,7 @@ train:
   batch_size: 64
   epochs: 50
   num_workers: 0
+  early_stopping_patience: 7
+  grad_clip_norm: 1.0
+  scheduler_factor: 0.5
+  scheduler_patience: 3

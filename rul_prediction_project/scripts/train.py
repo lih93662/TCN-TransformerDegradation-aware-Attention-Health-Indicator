@@ -78,6 +78,10 @@ def main() -> None:
         batch_size=int(train_cfg_raw["batch_size"]),
         epochs=int(train_cfg_raw["epochs"]),
         num_workers=int(train_cfg_raw.get("num_workers", 0)),
+        early_stopping_patience=int(train_cfg_raw.get("early_stopping_patience", 5)),
+        grad_clip_norm=float(train_cfg_raw.get("grad_clip_norm", 0.0)),
+        scheduler_factor=float(train_cfg_raw.get("scheduler_factor", 0.5)),
+        scheduler_patience=int(train_cfg_raw.get("scheduler_patience", 3)),
     )
 
     device = get_device()
@@ -89,6 +93,7 @@ def main() -> None:
         device=device,
         checkpoint_path=project_paths["checkpoints"] / "best_model.pth",
         logger=logger,
+        logs_dir=project_paths["logs"],
     )
 
     history = trainer.fit(prepared.train_dataset, prepared.valid_dataset)

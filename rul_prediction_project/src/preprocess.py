@@ -257,6 +257,12 @@ def _runs_to_samples(
                 f"got {sensors.shape[1]} expected {sensor_dim}."
             )
 
+        channel_std = np.std(sensors, axis=0)
+        if np.any(channel_std < 1e-8):
+            raise RuntimeError(
+                f"Degenerate normalized sensor channel detected for run {run.bearing_id}: {channel_std}."
+            )
+
         cycles = run.frame["cycle"].to_numpy(dtype=np.int32)
         rul = compute_linear_rul(cycles, max_rul=max_rul)
 

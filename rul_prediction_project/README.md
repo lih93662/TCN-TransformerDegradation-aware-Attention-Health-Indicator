@@ -71,6 +71,11 @@ The dataset is read directly from this location. No dataset duplication is perfo
 python scripts/train.py --config configs/config.yaml
 ```
 
+Training diagnostics are exported to:
+- `outputs/logs/batch_loss_log.csv` (per-batch train/valid loss + LR)
+- `outputs/logs/attention_epoch_stats.csv` (attention min/max/mean/std by epoch)
+- `outputs/logs/attention_maps/epoch_*_{train|valid}.npy` (epoch-average attention maps)
+
 ## Evaluation
 
 ```bash
@@ -100,6 +105,12 @@ PHM2012 directory (recommended):
 
 ```bash
 python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_dir Full_Test_Set
+```
+
+Debug mode for constant-prediction diagnosis:
+
+```bash
+python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_dir Full_Test_Set --debug
 ```
 
 Outputs are saved to `outputs/online_predictions/` per bearing:

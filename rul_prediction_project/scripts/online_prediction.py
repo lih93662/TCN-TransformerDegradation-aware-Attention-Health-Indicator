@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional single CSV input file.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print window/attention diagnostics for debugging constant predictions.",
+    )
     return parser.parse_args()
 
 
@@ -193,6 +198,7 @@ def predict_sequence(
     scaler: StandardScaler,
     window_size: int,
     device: torch.device,
+    debug: bool = False,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
     """Run sliding-window inference for one signal sequence.
 
@@ -221,6 +227,14 @@ def predict_sequence(
 
     signal_norm = scaler.transform(signal.astype(np.float32))
 
+    if debug and len(signal_norm) >= window_size:
+        first_window = signal_norm[:window_size]
+        print(
+            f"[Debug] first window shape={first_window.shape}, "
+            f"sensor0(min,max)=({first_window[:,0].min():.4f},{first_window[:,0].max():.4f}), "
+            f"sensor1(min,max)=({first_window[:,1].min():.4f},{first_window[:,1].max():.4f})"
+        )
+
     rows: List[Dict[str, float]] = []
     attn_sum: torch.Tensor | None = None
     attn_count = 0
@@ -244,11 +258,22 @@ def predict_sequence(
             )
 
             if "attn_map" in out:
-                attn = out["attn_map"].mean(dim=(0, 1)).detach().cpu()
+                attn_map = out["attn_map"]
+                if debug and (t == window_size or t == len(signal_norm)):
+                    print(
+                        f"[Debug] cycle={int(cycles[t-1])} attention min/max="
+                        f"({attn_map.min().item():.6f}, {attn_map.max().item():.6f})"
+                    )
+                attn = attn_map.mean(dim=(0, 1)).detach().cpu()
                 attn_sum = attn if attn_sum is None else (attn_sum + attn)
                 attn_count += 1
 
     results = pd.DataFrame(rows)
+    if len(results):
+        hi = results["health_indicator"].to_numpy(dtype=np.float32)
+        hi_min, hi_max = float(np.min(hi)), float(np.max(hi))
+        if hi_max > hi_min:
+            results["health_indicator"] = (hi - hi_min) / (hi_max - hi_min)
     if attn_sum is None or attn_count == 0:
         attn_avg = np.eye(window_size, dtype=np.float32)
     else:
@@ -378,6 +403,7 @@ def main() -> None:
                 scaler=prepared.scaler,
                 window_size=window_size,
                 device=device,
+                debug=args.debug,
             )
         except Exception as exc:
             print(f"[Warning] Inference failed for {csv_file.name}: {exc}")
@@ -394,8 +420,9 @@ def main() -> None:
         plot_hi_curve(results, hi_png)
         plot_attention_heatmap(attentions, attn_png)
 
+        first_rul = float(results["predicted_rul"].iloc[0]) if len(results) else float("nan")
         final_rul = float(results["predicted_rul"].iloc[-1]) if len(results) else float("nan")
-        print(f"Predicted final RUL: {final_rul:.0f} cycles")
+        print(f"Predicted RUL first/last: {first_rul:.0f} -> {final_rul:.0f} cycles")
         print("Results saved to outputs/online_predictions/")
 
 
