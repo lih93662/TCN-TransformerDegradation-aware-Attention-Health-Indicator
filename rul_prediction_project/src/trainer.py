@@ -1,4 +1,11 @@
-"""Training loop implementation for hybrid RUL model."""
+"""Training loop implementation for hybrid RUL model.
+
+This module provides:
+- GPU-aware training/validation loops.
+- Best-checkpoint saving.
+- Epoch-level structured logs.
+- Early stopping based on validation RMSE to reduce overfitting.
+"""
 
 from __future__ import annotations
 
@@ -17,14 +24,22 @@ from .loss import CompositeRULLoss
 
 @dataclass
 class TrainerConfig:
+    """Trainer hyperparameter container."""
+
     lr: float = 3e-4
     batch_size: int = 64
     epochs: int = 50
     num_workers: int = 0
+    early_stopping_patience: int = 5
 
 
 class Trainer:
-    """Encapsulated trainer with logging/checkpointing support."""
+    """Encapsulated trainer with checkpointing and early stopping.
+
+    Early stopping behavior:
+    - Monitors ``valid_rmse``.
+    - Stops if it does not improve for ``patience`` epochs.
+    """
 
     def __init__(
         self,
@@ -44,9 +59,13 @@ class Trainer:
         self.optimizer = Adam(self.model.parameters(), lr=config.lr)
 
         self.history: List[Dict[str, float]] = []
-        self.best_val = float("inf")
+        self.best_val_total = float("inf")
+        self.best_val_rmse = float("inf")
+        self.no_improve_epochs = 0
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
+        """Create dataloader with consistent options."""
+
         return DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -56,6 +75,8 @@ class Trainer:
         )
 
     def _train_epoch(self, loader: DataLoader, epoch: int) -> Dict[str, float]:
+        """Run one training epoch and return averaged losses."""
+
         self.model.train()
         total_loss = 0.0
         total_rmse = 0.0
@@ -91,6 +112,8 @@ class Trainer:
         }
 
     def _validate_epoch(self, loader: DataLoader, epoch: int) -> Dict[str, float]:
+        """Run one validation epoch and return averaged losses."""
+
         self.model.eval()
         total_loss = 0.0
         total_rmse = 0.0
@@ -122,19 +145,22 @@ class Trainer:
             "valid_mae": total_mae / n,
         }
 
-    def _save_checkpoint(self, epoch: int, valid_total: float) -> None:
+    def _save_checkpoint(self, epoch: int, valid_total: float, valid_rmse: float) -> None:
+        """Persist best checkpoint payload."""
+
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "epoch": epoch,
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "best_valid_total": valid_total,
+            "best_valid_rmse": valid_rmse,
             "config": self.config.__dict__,
         }
         torch.save(payload, self.checkpoint_path)
 
     def fit(self, train_dataset, valid_dataset) -> List[Dict[str, float]]:
-        """Execute full training loop and return metric history."""
+        """Execute training loop with early stopping and return history."""
 
         train_loader = self._make_loader(train_dataset, shuffle=True)
         valid_loader = self._make_loader(valid_dataset, shuffle=False)
@@ -160,14 +186,34 @@ class Trainer:
                 va["valid_mae"],
             )
 
-            if va["valid_total"] < self.best_val:
-                self.best_val = va["valid_total"]
-                self._save_checkpoint(epoch, self.best_val)
+            # Save by objective (total) and monitor early stopping by RMSE.
+            if va["valid_total"] < self.best_val_total:
+                self.best_val_total = va["valid_total"]
+                self._save_checkpoint(epoch, self.best_val_total, va["valid_rmse"])
                 self.logger.info(
-                    "Saved new best checkpoint at epoch %03d with valid_total=%.4f",
+                    "Saved checkpoint at epoch %03d with valid_total=%.4f",
                     epoch,
-                    self.best_val,
+                    self.best_val_total,
                 )
+
+            if va["valid_rmse"] < self.best_val_rmse:
+                self.best_val_rmse = va["valid_rmse"]
+                self.no_improve_epochs = 0
+            else:
+                self.no_improve_epochs += 1
+                self.logger.info(
+                    "EarlyStopping monitor valid_rmse did not improve (%d/%d)",
+                    self.no_improve_epochs,
+                    self.config.early_stopping_patience,
+                )
+
+            if self.no_improve_epochs >= self.config.early_stopping_patience:
+                self.logger.info(
+                    "Early stopping triggered at epoch %03d (best valid_rmse=%.4f)",
+                    epoch,
+                    self.best_val_rmse,
+                )
+                break
 
         return self.history
 

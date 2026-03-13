@@ -8,3 +8,6 @@ outputs/figures/*.png
 outputs/results/*.csv
 outputs/results/*.json
 outputs/paper_figures/*.png
+outputs/online_predictions/*.csv
+outputs/online_predictions/*.png
+outputs/benchmark_results.png

@@ -86,12 +86,27 @@ python scripts/run_benchmark.py --config configs/config.yaml
 Outputs:
 
 - `outputs/results/benchmark_results.csv`
+- `outputs/benchmark_results.png`
 
 ## Online Prediction
+
+Single file:
 
 ```bash
 python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_file /path/to/new_signal.csv
 ```
+
+PHM2012 directory (recommended):
+
+```bash
+python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_dir Full_Test_Set
+```
+
+Outputs are saved to `outputs/online_predictions/` per bearing:
+- `*_prediction.csv`
+- `*_rul_curve.png`
+- `*_hi_curve.png`
+- `*_attention_heatmap.png`
 
 ## Paper Figures
 
