@@ -1,15 +1,17 @@
 """PHM2012 batch online inference script for RUL prediction.
 
-This script performs batch inference over CSV files in an input directory using
-an already trained hybrid model:
+This script supports batch inference over CSV files under an input directory and
+(optional) single-file backward compatibility.
 
-TCN + Transformer + Degradation-aware Attention + Health Indicator.
+Model family:
+    TCN + Transformer + Degradation-aware Attention + Health Indicator (HI)
 
-Design constraints implemented here:
-- Accept only ``--input_dir``.
-- Input directory must be provided as an absolute path.
-- Process all CSV files in the directory tree.
-- Save per-file CSV outputs and visualizations to outputs/online_predictions/.
+Workflow per file:
+1. Load CSV and extract two sensor channels (sensor_0, sensor_1).
+2. Normalize with the same scaler used during training.
+3. Run sliding-window inference to predict RUL and HI.
+4. Aggregate attention maps (if available).
+5. Save CSV + figures under outputs/online_predictions/.
 """
 
 from __future__ import annotations
@@ -36,87 +38,93 @@ from src.utils import get_device, load_yaml, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments.
+    """Parse CLI arguments.
 
     Returns:
         Parsed CLI namespace.
     """
 
-    parser = argparse.ArgumentParser(description="PHM2012 RUL batch online inference")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=str(ROOT / "configs" / "config.yaml"),
-        help="Path to configuration YAML.",
-    )
+    parser = argparse.ArgumentParser(description="PHM2012 online batch inference")
+    parser.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=str(ROOT / "outputs" / "checkpoints" / "best_model.pth"),
-        help="Path to trained checkpoint.",
     )
     parser.add_argument(
         "--input_dir",
         type=str,
-        required=True,
-        help="Absolute path to PHM2012 test directory.",
+        default=None,
+        help="Input directory containing CSV files (absolute or relative path).",
+    )
+    # Optional backward compatibility with earlier script usage.
+    parser.add_argument(
+        "--input_file",
+        type=str,
+        default=None,
+        help="Optional single CSV input file.",
     )
     return parser.parse_args()
 
 
-def discover_csv_files(input_dir: str) -> List[Path]:
-    """Traverse input directory and return all CSV files.
-
-    Path handling policy:
-    - use ``os.path.abspath`` for normalization
-    - require the original user-provided path to be absolute
+def resolve_input_dir(path_str: str) -> str:
+    """Convert input path to absolute path using os.path.abspath.
 
     Args:
-        input_dir: User input directory string.
+        path_str: Input directory path (relative or absolute).
 
     Returns:
-        Sorted list of CSV file paths.
-
-    Raises:
-        FileNotFoundError: If path does not exist.
-        ValueError: If path is not absolute.
+        Absolute path string.
     """
 
-    if not os.path.isabs(input_dir):
-        raise ValueError(f"Input directory must be an absolute path: {input_dir}")
+    return os.path.abspath(path_str)
 
-    normalized = os.path.abspath(input_dir)
-    if not os.path.exists(normalized):
-        raise FileNotFoundError(f"Input directory not found: {normalized}")
+
+def discover_csv_files(input_dir: str) -> List[Path]:
+    """Traverse directory tree and collect all CSV files.
+
+    Args:
+        input_dir: Input directory string.
+
+    Returns:
+        Sorted list of CSV paths.
+
+    Raises:
+        FileNotFoundError: If directory does not exist.
+    """
+
+    abs_dir = resolve_input_dir(input_dir)
+    if not os.path.exists(abs_dir):
+        raise FileNotFoundError(f"Input directory not found: {abs_dir}")
 
     csv_files: List[Path] = []
-    for root, _, files in os.walk(normalized):
-        for name in files:
-            if name.lower().endswith(".csv"):
-                csv_files.append(Path(root) / name)
-            # non-CSV files are intentionally skipped
+    for root, _, files in os.walk(abs_dir):
+        for file_name in files:
+            if file_name.lower().endswith(".csv"):
+                csv_files.append(Path(root) / file_name)
+            # Non-CSV files are intentionally skipped.
 
     csv_files.sort(key=lambda p: str(p))
     return csv_files
 
 
 def load_signal_file(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """Load one CSV file and extract two sensor channels.
+    """Load one CSV file and extract two numeric sensor channels.
 
-    Signal loading details:
-    1. Read CSV with pandas.
-    2. Keep numeric columns only.
-    3. Use optional ``cycle`` column when available, otherwise create one.
-    4. Select first two numeric sensor columns.
-    5. Conceptually rename channels to ``sensor_0`` and ``sensor_1``.
+    Signal loading logic:
+    - Read CSV with pandas.
+    - Keep only numeric columns.
+    - Detect optional cycle column.
+    - Select first two numeric sensor columns.
+    - Map selected channels to semantic names: sensor_0 and sensor_1.
 
     Args:
         path: CSV file path.
 
     Returns:
-        Tuple of:
-        - signal_raw: numpy array shape (T, 2)
-        - cycles: numpy array shape (T,)
+        Tuple:
+            signal_raw: Array (T, 2)
+            cycles: Array (T,)
     """
 
     frame = pd.read_csv(path)
@@ -136,6 +144,7 @@ def load_signal_file(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     if len(sensor_candidates) < 2:
         raise ValueError(f"{path.name} has fewer than two usable sensor columns.")
 
+    # Rename semantics to sensor_0 and sensor_1.
     sensor_0 = frame[sensor_candidates[0]].to_numpy(dtype=np.float32)
     sensor_1 = frame[sensor_candidates[1]].to_numpy(dtype=np.float32)
     signal_raw = np.stack([sensor_0, sensor_1], axis=1)
@@ -144,7 +153,7 @@ def load_signal_file(path: Path) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device) -> HybridRULModel:
-    """Build hybrid model and load checkpoint state."""
+    """Instantiate and load the hybrid model from checkpoint."""
 
     m = cfg["model"]
     model_cfg = ModelConfig(
@@ -173,17 +182,16 @@ def predict_sequence(
     window_size: int,
     device: torch.device,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
-    """Run sliding-window inference and collect RUL/HI/attention.
+    """Run sliding-window inference for one signal sequence.
 
-    Sliding-window process:
-    - Normalize with training scaler (same normalization as training).
-    - For each cycle position t >= window_size, build trailing window and run
-      model forward pass.
+    Sliding-window creation:
+    - Normalize raw signal with training scaler.
+    - For each t in [window_size, T], use window signal[t-window_size:t].
 
-    Model inference outputs:
-    - ``pred`` for Remaining Useful Life.
-    - ``hi`` for Health Indicator.
-    - ``attn_map`` optionally used for heatmap generation.
+    Model inference:
+    - Predict RUL via output key ``pred``.
+    - Predict Health Indicator via output key ``hi``.
+    - Optionally aggregate attention from output key ``attn_map``.
 
     Args:
         model: Loaded model.
@@ -195,8 +203,8 @@ def predict_sequence(
 
     Returns:
         Tuple:
-        - prediction dataframe with columns cycle,predicted_rul,health_indicator
-        - averaged attention matrix
+            results dataframe (cycle,predicted_rul,health_indicator)
+            attention heatmap matrix
     """
 
     signal_norm = scaler.transform(signal.astype(np.float32))
@@ -228,18 +236,17 @@ def predict_sequence(
                 attn_sum = attn if attn_sum is None else (attn_sum + attn)
                 attn_count += 1
 
-    pred_df = pd.DataFrame(rows)
-
+    results = pd.DataFrame(rows)
     if attn_sum is None or attn_count == 0:
         attn_avg = np.eye(window_size, dtype=np.float32)
     else:
         attn_avg = (attn_sum / float(attn_count)).numpy().astype(np.float32)
 
-    return pred_df, attn_avg
+    return results, attn_avg
 
 
 def plot_rul_curve(results: pd.DataFrame, save_path: Path) -> None:
-    """Plot predicted RUL vs cycle."""
+    """Plot predicted RUL vs cycle and save figure."""
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(10, 4.5))
@@ -253,11 +260,11 @@ def plot_rul_curve(results: pd.DataFrame, save_path: Path) -> None:
 
 
 def plot_hi_curve(results: pd.DataFrame, save_path: Path) -> None:
-    """Plot health indicator vs cycle."""
+    """Plot HI vs cycle and save figure."""
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(10, 4.5))
-    plt.plot(results["cycle"], results["health_indicator"], color="purple", linewidth=2)
+    plt.plot(results["cycle"], results["health_indicator"], linewidth=2, color="purple")
     plt.xlabel("cycle")
     plt.ylabel("health_indicator")
     plt.title("Health Indicator Curve")
@@ -268,7 +275,7 @@ def plot_hi_curve(results: pd.DataFrame, save_path: Path) -> None:
 
 
 def plot_attention_heatmap(attentions: np.ndarray, save_path: Path) -> None:
-    """Plot attention heatmap vs cycle/window indices."""
+    """Plot attention heatmap and save figure."""
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(6, 5))
@@ -282,25 +289,35 @@ def plot_attention_heatmap(attentions: np.ndarray, save_path: Path) -> None:
 
 
 def main() -> None:
-    """Main function for PHM2012 batch inference."""
+    """Batch process all CSV files from input directory (or single file fallback)."""
 
     args = parse_args()
     cfg = load_yaml(args.config)
+    set_seed(int(cfg["experiment"].get("seed", 42)))
 
-    seed = int(cfg["experiment"].get("seed", 42))
-    set_seed(seed)
+    file_list: List[Path] = []
 
-    try:
-        csv_files = discover_csv_files(args.input_dir)
-    except FileNotFoundError as exc:
-        print(str(exc))
-        return
-    except ValueError as exc:
-        print(str(exc))
-        return
+    # Preferred mode: directory inference.
+    if args.input_dir is not None:
+        try:
+            file_list = discover_csv_files(args.input_dir)
+        except FileNotFoundError as exc:
+            print(str(exc))
+            return
 
-    if not csv_files:
-        print("No CSV files found in directory.")
+        if not file_list:
+            print("No CSV files found in directory.")
+            return
+
+    # Optional backward compatibility with single-file input.
+    elif args.input_file is not None:
+        single = Path(args.input_file)
+        if not single.exists():
+            print(f"Input file not found: {single}")
+            return
+        file_list = [single]
+    else:
+        print("Please provide --input_dir (or --input_file for backward compatibility).")
         return
 
     checkpoint = Path(args.checkpoint)
@@ -310,14 +327,14 @@ def main() -> None:
     print("Loading model from checkpoint...")
     device = get_device()
 
-    # Prepare once to obtain the same scaler used in training.
+    # Build training-consistent scaler once.
     prepared = prepare_datasets(
         dataset_root=cfg["data"]["dataset_root"],
         window_size=int(cfg["data"].get("window_size", 40)),
         stride=int(cfg["data"].get("stride", 10)),
         max_rul=int(cfg["data"].get("max_rul", 125)),
         valid_ratio=float(cfg["data"].get("valid_ratio", 0.2)),
-        seed=seed,
+        seed=int(cfg["experiment"].get("seed", 42)),
         sensor_dim=2,
         max_windows_per_bearing=int(cfg["data"].get("max_windows_per_bearing", 20000)),
     )
@@ -328,7 +345,7 @@ def main() -> None:
     out_dir = ROOT / "outputs" / "online_predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for csv_file in csv_files:
+    for csv_file in file_list:
         print(f"Processing file: {csv_file.name}")
 
         try:
