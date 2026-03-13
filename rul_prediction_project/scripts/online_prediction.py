@@ -1,16 +1,13 @@
-"""Online inference script for PHM2012 RUL prediction.
+"""Online PHM2012 directory inference for RUL prediction.
 
-This script is intentionally focused on robust batch-style online inference over
-all CSV files in a directory. It uses the trained hybrid model:
-
+This script performs directory-based inference for the hybrid model:
 TCN + Transformer + Degradation-aware Attention + Health Indicator.
 
-Main workflow:
-1) Load config and checkpoint.
-2) Discover all CSV files under --input_dir.
-3) For each file, load and normalize first two sensor channels.
-4) Run sliding-window inference to predict RUL and HI at each cycle.
-5) Save prediction CSV and two visualization curves.
+Key behavior:
+- Accepts --input_dir (absolute path only).
+- Lists all CSV files under that directory.
+- For each file, loads signals, builds sliding windows, predicts RUL + HI,
+  optionally collects attention maps, and saves CSV/plots.
 """
 
 from __future__ import annotations
@@ -23,6 +20,7 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,187 +28,80 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
-from src.preprocess import prepare_datasets
+from src.preprocess import StandardScaler, prepare_datasets
 from src.utils import get_device, load_yaml, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments.
+    """Parse CLI arguments.
 
     Returns:
-        Parsed CLI arguments namespace.
+        Parsed namespace with config, checkpoint, and input_dir.
     """
 
-    parser = argparse.ArgumentParser(description="PHM2012 directory online inference")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=str(ROOT / "configs" / "config.yaml"),
-        help="Path to YAML config file.",
-    )
+    parser = argparse.ArgumentParser(description="PHM2012 online directory inference")
+    parser.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=str(ROOT / "outputs" / "checkpoints" / "best_model.pth"),
-        help="Path to trained checkpoint.",
     )
     parser.add_argument(
         "--input_dir",
         type=str,
         required=True,
-        help="Directory containing PHM2012 CSV files.",
+        help="Absolute path to PHM2012 test directory containing CSV files.",
     )
     return parser.parse_args()
 
 
-def load_signal_file(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """Load one PHM2012 CSV signal file.
+def load_signal_file(path: Path) -> Tuple[pd.DataFrame, np.ndarray]:
+    """Load one PHM2012 CSV file and map channels to sensor_0/sensor_1.
 
-    Steps implemented per requirement:
+    Signal loading logic:
     - read CSV with pandas
-    - select first two numeric sensor columns
-    - rename to sensor_0 / sensor_1 (internally)
-    - normalize channels with per-file z-score
-    - return normalized signal and cycle vector
+    - keep numeric columns
+    - use cycle column if present; otherwise create cycle index
+    - select first two sensor columns
+    - rename to sensor_0, sensor_1
 
     Args:
         path: CSV file path.
 
     Returns:
-        Tuple:
-            signal: normalized array of shape (T, 2)
-            cycles: cycle index array of shape (T,)
+        Tuple of:
+        - frame with columns [cycle, sensor_0, sensor_1]
+        - cycle array (int32)
     """
 
     frame = pd.read_csv(path)
+    num_cols = [c for c in frame.columns if np.issubdtype(frame[c].dtype, np.number)]
+    if len(num_cols) < 2:
+        raise ValueError(f"{path.name} has fewer than two numeric columns.")
 
-    # Keep numeric columns only so text/meta fields do not break inference.
-    numeric_cols = [c for c in frame.columns if np.issubdtype(frame[c].dtype, np.number)]
-    if len(numeric_cols) < 2:
-        raise ValueError(f"File {path.name} does not contain at least two numeric columns.")
-
-    # Use cycle column if available; otherwise create one.
-    cycle_col = None
-    for c in numeric_cols:
-        if str(c).lower() == "cycle":
-            cycle_col = c
-            break
-
+    cycle_col = next((c for c in num_cols if str(c).lower() == "cycle"), None)
     if cycle_col is None:
         cycles = np.arange(1, len(frame) + 1, dtype=np.int32)
-        sensor_candidates = numeric_cols
+        sensor_candidates = num_cols
     else:
         cycles = frame[cycle_col].to_numpy(dtype=np.int32)
-        sensor_candidates = [c for c in numeric_cols if c != cycle_col]
+        sensor_candidates = [c for c in num_cols if c != cycle_col]
 
     if len(sensor_candidates) < 2:
-        raise ValueError(f"File {path.name} has fewer than two usable sensor columns.")
+        raise ValueError(f"{path.name} has fewer than two usable sensor columns.")
 
-    # Required mapping to sensor_0 and sensor_1.
-    sensor_0 = frame[sensor_candidates[0]].to_numpy(dtype=np.float32)
-    sensor_1 = frame[sensor_candidates[1]].to_numpy(dtype=np.float32)
-    signal = np.stack([sensor_0, sensor_1], axis=1)
-
-    # Normalize each sensor channel (z-score) for stable model input scale.
-    mean = signal.mean(axis=0, keepdims=True)
-    std = signal.std(axis=0, keepdims=True)
-    signal = (signal - mean) / np.clip(std, 1e-8, None)
-
-    return signal.astype(np.float32), cycles
-
-
-def predict_sequence(
-    model: HybridRULModel,
-    signal: np.ndarray,
-    cycles: np.ndarray,
-    window_size: int,
-    device: torch.device,
-) -> pd.DataFrame:
-    """Run sliding-window RUL and HI prediction for one signal sequence.
-
-    Sliding window logic:
-        for t in range(window_size, len(signal) + 1):
-            window = signal[t-window_size:t]
-
-    Args:
-        model: Loaded PyTorch model.
-        signal: Normalized signal array of shape (T, 2).
-        cycles: Cycle array of shape (T,).
-        window_size: Inference window length.
-        device: CUDA/CPU device.
-
-    Returns:
-        DataFrame with columns:
-            cycle, predicted_rul, health_indicator
-    """
-
-    rows: List[Dict[str, float]] = []
-    model.eval()
-
-    # Iterate from first full window to end-of-sequence.
-    with torch.no_grad():
-        for t in range(window_size, len(signal) + 1):
-            # Build trailing window [t-window_size : t].
-            window = signal[t - window_size : t]
-            x = torch.from_numpy(window).float().unsqueeze(0).to(device)
-
-            # Model forward pass returns both RUL prediction and HI score.
-            out = model(x)
-            pred_rul = float(out["pred"].item())
-            hi = float(out["hi"].item())
-
-            rows.append(
-                {
-                    "cycle": int(cycles[t - 1]),
-                    "predicted_rul": pred_rul,
-                    "health_indicator": hi,
-                }
-            )
-
-    return pd.DataFrame(rows)
-
-
-def plot_rul_curve(pred_df: pd.DataFrame, save_path: Path) -> None:
-    """Plot predicted RUL curve.
-
-    Args:
-        pred_df: Prediction dataframe.
-        save_path: Output PNG path.
-    """
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(10, 4.5))
-    plt.plot(pred_df["cycle"], pred_df["predicted_rul"], linewidth=2.0)
-    plt.xlabel("cycle")
-    plt.ylabel("predicted_rul")
-    plt.title("RUL Prediction Curve")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=180)
-    plt.close()
-
-
-def plot_hi_curve(pred_df: pd.DataFrame, save_path: Path) -> None:
-    """Plot health indicator curve.
-
-    Args:
-        pred_df: Prediction dataframe.
-        save_path: Output PNG path.
-    """
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(10, 4.5))
-    plt.plot(pred_df["cycle"], pred_df["health_indicator"], linewidth=2.0, color="purple")
-    plt.xlabel("cycle")
-    plt.ylabel("health_indicator")
-    plt.title("Health Indicator Curve")
-    plt.ylim(0.0, 1.0)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=180)
-    plt.close()
+    out = pd.DataFrame(
+        {
+            "cycle": cycles,
+            "sensor_0": frame[sensor_candidates[0]].to_numpy(dtype=np.float32),
+            "sensor_1": frame[sensor_candidates[1]].to_numpy(dtype=np.float32),
+        }
+    )
+    return out, cycles
 
 
 def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device, sensor_dim: int = 2) -> HybridRULModel:
-    """Instantiate hybrid model and load checkpoint weights."""
+    """Build and load hybrid model from checkpoint."""
 
     m = cfg["model"]
     model_cfg = ModelConfig(
@@ -231,8 +122,128 @@ def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device, sensor_d
     return model
 
 
+def predict_sequence(
+    model: HybridRULModel,
+    signal: np.ndarray,
+    cycles: np.ndarray,
+    scaler: StandardScaler,
+    window_size: int,
+    device: torch.device,
+    extract_attention: bool = True,
+) -> Tuple[pd.DataFrame, np.ndarray | None]:
+    """Run sliding-window inference for one sequence.
+
+    Sliding window creation:
+    - Use trailing windows of length ``window_size``.
+    - For each window, run model inference and store cycle/RUL/HI.
+
+    Health indicator calculation:
+    - HI is taken from model output key ``hi`` per window.
+
+    Optional attention extraction:
+    - If enabled, attention maps (attn_map) are averaged over batch/head/time.
+
+    Args:
+        model: Trained model.
+        signal: Raw signal shape (T,2) from loaded file.
+        cycles: Cycle index shape (T,).
+        scaler: Training scaler (ensures same normalization as training).
+        window_size: Sliding window length.
+        device: Torch device.
+        extract_attention: Whether to aggregate attention heatmap.
+
+    Returns:
+        Tuple:
+        - prediction dataframe with columns cycle,predicted_rul,health_indicator
+        - averaged attention matrix or None
+    """
+
+    # Normalize with the SAME scaler used in training.
+    signal_norm = scaler.transform(signal.astype(np.float32))
+
+    model.eval()
+    rows: List[Dict[str, float]] = []
+
+    attn_sum: torch.Tensor | None = None
+    attn_count = 0
+
+    with torch.no_grad():
+        for t in range(window_size, len(signal_norm) + 1):
+            window = signal_norm[t - window_size : t]
+            x = torch.from_numpy(window).float().unsqueeze(0).to(device)
+
+            # Model inference produces RUL prediction and HI score.
+            out = model(x)
+            pred_rul = float(out["pred"].item())
+            hi = float(out["hi"].item())
+
+            rows.append(
+                {
+                    "cycle": int(cycles[t - 1]),
+                    "predicted_rul": pred_rul,
+                    "health_indicator": hi,
+                }
+            )
+
+            if extract_attention and "attn_map" in out:
+                attn = out["attn_map"].mean(dim=(0, 1)).detach().cpu()
+                if attn_sum is None:
+                    attn_sum = attn
+                else:
+                    attn_sum = attn_sum + attn
+                attn_count += 1
+
+    pred_df = pd.DataFrame(rows)
+    if attn_sum is None or attn_count == 0:
+        return pred_df, None
+    return pred_df, (attn_sum / float(attn_count)).numpy().astype(np.float32)
+
+
+def plot_rul_curve(pred_df: pd.DataFrame, save_path: Path) -> None:
+    """Plot predicted RUL curve for one bearing file."""
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(10, 4.5))
+    plt.plot(pred_df["cycle"], pred_df["predicted_rul"], linewidth=2.0)
+    plt.xlabel("cycle")
+    plt.ylabel("predicted_rul")
+    plt.title("RUL Prediction Curve")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=180)
+    plt.close()
+
+
+def plot_hi_curve(pred_df: pd.DataFrame, save_path: Path) -> None:
+    """Plot health indicator curve for one bearing file."""
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(10, 4.5))
+    plt.plot(pred_df["cycle"], pred_df["health_indicator"], linewidth=2.0, color="purple")
+    plt.xlabel("cycle")
+    plt.ylabel("health_indicator")
+    plt.title("Health Indicator Curve")
+    plt.ylim(0.0, 1.0)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=180)
+    plt.close()
+
+
+def plot_attention_heatmap(attn: np.ndarray, save_path: Path) -> None:
+    """Plot optional attention heatmap when attention is available."""
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(attn, cmap="mako", cbar=True)
+    plt.title("Attention Heatmap")
+    plt.xlabel("Key index")
+    plt.ylabel("Query index")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=180)
+    plt.close()
+
+
 def main() -> None:
-    """Program entrypoint."""
+    """Entrypoint for directory-based online inference."""
 
     args = parse_args()
     cfg = load_yaml(args.config)
@@ -241,14 +252,16 @@ def main() -> None:
     set_seed(seed)
 
     input_dir = Path(args.input_dir)
+    if not input_dir.is_absolute():
+        print(f"Input directory must be an absolute path: {input_dir}")
+        return
     if not input_dir.exists():
-        print("Input directory not found:")
-        print(str(input_dir))
+        print(f"Input directory not found: {input_dir}")
         return
 
     csv_files = sorted(input_dir.rglob("*.csv"))
     if not csv_files:
-        print(f"No CSV files found in directory: {input_dir}")
+        print("No CSV files found in directory.")
         return
 
     checkpoint = Path(args.checkpoint)
@@ -258,9 +271,8 @@ def main() -> None:
     print("Loading model from checkpoint...")
     device = get_device()
 
-    # Build scaler context by preparing datasets (keeps pipeline consistent).
-    # We only need this call for reproducibility consistency with training setup.
-    _ = prepare_datasets(
+    # Prepare datasets to obtain the same scaler used during training.
+    prepared = prepare_datasets(
         dataset_root=cfg["data"]["dataset_root"],
         window_size=int(cfg["data"].get("window_size", 40)),
         stride=int(cfg["data"].get("stride", 10)),
@@ -272,41 +284,43 @@ def main() -> None:
     )
 
     model = build_model(cfg, checkpoint, device=device, sensor_dim=2)
-
     window_size = int(cfg["data"].get("window_size", 40))
+
     out_dir = ROOT / "outputs" / "online_predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for file_path in csv_files:
         print(f"Processing file: {file_path.name}")
 
-        signal, cycles = load_signal_file(file_path)
-        print(f"Signal length: {len(signal)}")
+        signal_df, cycles = load_signal_file(file_path)
+        signal = signal_df[["sensor_0", "sensor_1"]].to_numpy(dtype=np.float32)
+        print(f"Signal length: {len(signal)} cycles")
 
-        pred_df = predict_sequence(
+        pred_df, attn = predict_sequence(
             model=model,
             signal=signal,
             cycles=cycles,
+            scaler=prepared.scaler,
             window_size=window_size,
             device=device,
+            extract_attention=True,
         )
 
         base = file_path.stem
         csv_path = out_dir / f"{base}_prediction.csv"
         rul_png = out_dir / f"{base}_rul_curve.png"
         hi_png = out_dir / f"{base}_hi_curve.png"
+        attn_png = out_dir / f"{base}_attention_heatmap.png"
 
         pred_df.to_csv(csv_path, index=False)
         plot_rul_curve(pred_df, rul_png)
         plot_hi_curve(pred_df, hi_png)
+        if attn is not None:
+            plot_attention_heatmap(attn, attn_png)
 
-        if len(pred_df):
-            print(f"Predicted final RUL: {pred_df['predicted_rul'].iloc[-1]:.0f} cycles")
-        else:
-            print("Predicted final RUL: N/A (sequence shorter than window size)")
-
-    print("\nResults saved to:")
-    print(str(out_dir))
+        final_rul = pred_df["predicted_rul"].iloc[-1] if len(pred_df) else float("nan")
+        print(f"Predicted final RUL: {final_rul:.0f}")
+        print(f"Results saved to outputs/online_predictions/{base}_*")
 
 
 if __name__ == "__main__":
