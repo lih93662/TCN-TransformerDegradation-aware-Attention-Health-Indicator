@@ -68,7 +68,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_input_dir(path_str: str) -> str:
-    """Convert input path to absolute path using os.path.abspath.
+    """Resolve input directory to absolute path.
+
+    Resolution order for relative paths:
+    1) Current working directory
+    2) Project root directory (ROOT)
 
     Args:
         path_str: Input directory path (relative or absolute).
@@ -77,7 +81,15 @@ def resolve_input_dir(path_str: str) -> str:
         Absolute path string.
     """
 
-    return os.path.abspath(path_str)
+    if os.path.isabs(path_str):
+        return path_str
+
+    from_cwd = os.path.abspath(path_str)
+    if os.path.exists(from_cwd):
+        return from_cwd
+
+    from_root = str((ROOT / path_str).resolve())
+    return from_root
 
 
 def discover_csv_files(input_dir: str) -> List[Path]:
@@ -312,6 +324,8 @@ def main() -> None:
     # Optional backward compatibility with single-file input.
     elif args.input_file is not None:
         single = Path(args.input_file)
+        if not single.is_absolute() and not single.exists():
+            single = ROOT / single
         if not single.exists():
             print(f"Input file not found: {single}")
             return
