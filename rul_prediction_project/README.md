@@ -75,6 +75,7 @@ Training diagnostics are exported to:
 - `outputs/logs/batch_loss_log.csv` (per-batch train/valid loss + LR)
 - `outputs/logs/attention_epoch_stats.csv` (attention min/max/mean/std by epoch)
 - `outputs/logs/attention_maps/epoch_*_{train|valid}.npy` (epoch-average attention maps)
+- training stability knobs in `configs/config.yaml`: `grad_clip_norm`, `scheduler_factor`, `scheduler_patience`, `weight_decay`
 
 ## Evaluation
 

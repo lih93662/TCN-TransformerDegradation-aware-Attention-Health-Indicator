@@ -38,6 +38,7 @@ class TrainerConfig:
     grad_clip_norm: float = 0.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
+    weight_decay: float = 1e-4
 
 
 class Trainer:
@@ -66,7 +67,7 @@ class Trainer:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         self.criterion = CompositeRULLoss(rmse_weight=1.0, mae_weight=0.3)
-        self.optimizer = Adam(self.model.parameters(), lr=config.lr)
+        self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="min",
@@ -145,9 +146,12 @@ class Trainer:
 
                 if train:
                     loss_out.total.backward()
+                    grad_norm = float("nan")
                     if self.config.grad_clip_norm and self.config.grad_clip_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+                        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm).item())
                     self.optimizer.step()
+                else:
+                    grad_norm = float("nan")
 
                 total_loss += float(loss_out.total.item())
                 total_rmse += float(loss_out.rmse.item())
@@ -183,6 +187,7 @@ class Trainer:
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
+                        "grad_norm": grad_norm,
                     }
                 )
 
@@ -291,20 +296,24 @@ class Trainer:
                 va_attn_stats["attn_max"],
             )
 
-            self.scheduler.step(va["valid_total"])
+            self.scheduler.step(va["valid_rmse"])
 
-            if va["valid_total"] < self.best_val_total:
+            improved_total = va["valid_total"] < self.best_val_total
+            improved_rmse = va["valid_rmse"] < self.best_val_rmse
+
+            if improved_total:
                 self.best_val_total = va["valid_total"]
-                self._save_checkpoint(epoch, self.best_val_total, va["valid_rmse"])
-                self.logger.info(
-                    "Saved checkpoint at epoch %03d with valid_total=%.4f",
-                    epoch,
-                    self.best_val_total,
-                )
 
-            if va["valid_rmse"] < self.best_val_rmse:
+            if improved_rmse:
                 self.best_val_rmse = va["valid_rmse"]
                 self.no_improve_epochs = 0
+                self._save_checkpoint(epoch, self.best_val_total, self.best_val_rmse)
+                self.logger.info(
+                    "Saved checkpoint at epoch %03d with valid_rmse=%.4f and valid_total=%.4f",
+                    epoch,
+                    self.best_val_rmse,
+                    va["valid_total"],
+                )
             else:
                 self.no_improve_epochs += 1
                 self.logger.info(

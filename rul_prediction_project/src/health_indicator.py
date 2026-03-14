@@ -56,26 +56,23 @@ class HealthIndicatorNet(nn.Module):
         super().__init__()
         input_dim = sensor_dim * 4
         self.extractor = StatisticalFeatureExtractor()
+        self.norm = nn.LayerNorm(input_dim)
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
             nn.Linear(32, 16),
             nn.ReLU(inplace=True),
             nn.Linear(16, 1),
         )
-        self.out_act = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return HI scalar and raw statistical feature embedding."""
 
         stat_feat = self.extractor(x)
-        hi_logit = self.mlp(stat_feat)
-        hi_score = self.out_act(hi_logit)
+        stat_feat_norm = self.norm(stat_feat)
+        hi_logit = self.mlp(stat_feat_norm)
+        hi_score = torch.sigmoid(hi_logit)
 
-        # Optional contrast normalization for training batches only.
-        if hi_score.size(0) > 1:
-            hi_min = hi_score.min(dim=0, keepdim=True).values
-            hi_max = hi_score.max(dim=0, keepdim=True).values
-            hi_score = (hi_score - hi_min) / (hi_max - hi_min + 1e-6)
-
+        # Keep deterministic [0,1] output per window (no batch-wise normalization).
         return hi_score, stat_feat
