@@ -17,7 +17,7 @@ model:
   transformer_heads: 4
   transformer_layers: 2
   transformer_ffn_dim: 256
-  dropout: 0.1
+  dropout: 0.3
 
 train:
   lr: 0.0001

@@ -22,6 +22,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+import re
 
 import numpy as np
 
@@ -31,7 +32,6 @@ from .dataset import (
     PHM2012RULDataset,
     build_sliding_windows,
     load_all_bearings,
-    split_train_valid,
 )
 
 
@@ -80,6 +80,41 @@ class PreparedData:
     scaler: StandardScaler
     feature_dim: int
     detected_sensor_columns: List[str]
+
+
+# Fixed PHM2012 bearing-level split to avoid leakage across windows from the same bearing.
+TRAIN_BEARINGS = {"Bearing1_1", "Bearing1_2", "Bearing2_1", "Bearing2_2"}
+VALID_BEARINGS = {"Bearing3_1", "Bearing3_2"}
+TEST_BEARINGS = {"Bearing1_3", "Bearing2_3", "Bearing3_3"}
+
+
+def _canonical_bearing_name(run: BearingRun) -> str:
+    """Extract canonical bearing name (e.g., ``Bearing1_1``) from run id/path-derived id."""
+
+    match = re.search(r"(Bearing\d+_\d+)", run.bearing_id, flags=re.IGNORECASE)
+    if match is None:
+        return run.bearing_id
+    name = match.group(1)
+    return name[0].upper() + name[1:]
+
+
+def split_by_fixed_bearings(runs: Sequence[BearingRun]) -> Tuple[List[BearingRun], List[BearingRun], List[BearingRun]]:
+    """Split runs by fixed PHM2012 bearing IDs (train/valid/test)."""
+
+    train_runs: List[BearingRun] = []
+    valid_runs: List[BearingRun] = []
+    test_runs: List[BearingRun] = []
+
+    for run in runs:
+        bname = _canonical_bearing_name(run)
+        if bname in TRAIN_BEARINGS:
+            train_runs.append(run)
+        elif bname in VALID_BEARINGS:
+            valid_runs.append(run)
+        elif bname in TEST_BEARINGS:
+            test_runs.append(run)
+
+    return train_runs, valid_runs, test_runs
 
 
 def compute_linear_rul(cycles: np.ndarray, max_rul: int = 125) -> np.ndarray:
@@ -326,13 +361,21 @@ def prepare_datasets(
     root = Path(dataset_root)
     runs = load_all_bearings(root)
 
-    learning_runs = [r for r in runs if r.split == "Learning_set"]
-    test_runs = [r for r in runs if r.split == "Test_set"]
-    if not learning_runs:
-        learning_runs = runs
-        test_runs = []
+    train_runs, valid_runs, test_runs = split_by_fixed_bearings(runs)
 
-    train_runs, valid_runs = split_train_valid(learning_runs, valid_ratio=valid_ratio, seed=seed)
+    # Fallback for non-standard mirrors: keep old split logic if fixed IDs are unavailable.
+    if not train_runs or not valid_runs:
+        learning_runs = [r for r in runs if r.split == "Learning_set"]
+        test_runs = [r for r in runs if r.split == "Test_set"]
+        if not learning_runs:
+            learning_runs = runs
+            test_runs = []
+
+        shuffled = list(learning_runs)
+        rng = np.random.default_rng(seed)
+        rng.shuffle(shuffled)
+        cut = max(1, int(len(shuffled) * (1.0 - valid_ratio)))
+        train_runs, valid_runs = shuffled[:cut], shuffled[cut:]
 
     scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim)
 
