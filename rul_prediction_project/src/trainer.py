@@ -30,12 +30,12 @@ from .loss import CompositeRULLoss
 class TrainerConfig:
     """Trainer hyperparameter container."""
 
-    lr: float = 3e-4
+    lr: float = 1e-4
     batch_size: int = 64
     epochs: int = 50
     num_workers: int = 0
-    early_stopping_patience: int = 5
-    grad_clip_norm: float = 0.0
+    early_stopping_patience: int = 20
+    grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
     weight_decay: float = 1e-4
@@ -288,12 +288,20 @@ class Trainer:
                 va["valid_mae"],
             )
             self.logger.info(
-                "Epoch %03d attention stats | train min/max %.5f/%.5f | valid min/max %.5f/%.5f",
+                (
+                    "Epoch %03d attention stats | "
+                    "train min/max %.5f/%.5f mean/std %.5f/%.5f | "
+                    "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
+                ),
                 epoch,
                 tr_attn_stats["attn_min"],
                 tr_attn_stats["attn_max"],
+                tr_attn_stats["attn_mean"],
+                tr_attn_stats["attn_std"],
                 va_attn_stats["attn_min"],
                 va_attn_stats["attn_max"],
+                va_attn_stats["attn_mean"],
+                va_attn_stats["attn_std"],
             )
 
             self.scheduler.step(va["valid_rmse"])

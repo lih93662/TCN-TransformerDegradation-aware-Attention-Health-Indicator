@@ -17,7 +17,13 @@ import torch.nn as nn
 class DegradationAwareAttention(nn.Module):
     """Custom attention integrating health indicator and late-life prior."""
 
-    def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int = 4,
+        dropout: float = 0.1,
+        temperature: float = 0.5,
+    ):
         super().__init__()
         if embed_dim % num_heads != 0:
             raise ValueError("embed_dim must be divisible by num_heads")
@@ -37,6 +43,7 @@ class DegradationAwareAttention(nn.Module):
             nn.Tanh(),
         )
         self.dropout = nn.Dropout(dropout)
+        self.temperature = float(temperature)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
@@ -76,7 +83,8 @@ class DegradationAwareAttention(nn.Module):
         hi_gate = self.hi_to_bias(hi_score).view(b, self.num_heads, 1, 1)
         degradation_bias = hi_gate * life
 
-        attn = torch.softmax(logits + degradation_bias, dim=-1)
+        scores = (logits + degradation_bias) / self.temperature
+        attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
         out = torch.matmul(attn, v)
         out = self.out_proj(self._combine_heads(out))
