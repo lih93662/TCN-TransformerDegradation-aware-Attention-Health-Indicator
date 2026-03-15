@@ -22,8 +22,6 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
-import re
-
 import numpy as np
 
 from .dataset import (
@@ -82,37 +80,40 @@ class PreparedData:
     detected_sensor_columns: List[str]
 
 
-# Fixed PHM2012 bearing-level split to avoid leakage across windows from the same bearing.
-TRAIN_BEARINGS = {"Bearing1_1", "Bearing1_2", "Bearing2_1", "Bearing2_2"}
-VALID_BEARINGS = {"Bearing3_1", "Bearing3_2"}
-TEST_BEARINGS = {"Bearing1_3", "Bearing2_3", "Bearing3_3"}
 
 
-def _canonical_bearing_name(run: BearingRun) -> str:
-    """Extract canonical bearing name (e.g., ``Bearing1_1``) from run id/path-derived id."""
+def split_official_learning_test(
+    runs: Sequence[BearingRun],
+    valid_ratio: float = 0.33,
+    seed: int = 42,
+) -> Tuple[List[BearingRun], List[BearingRun], List[BearingRun]]:
+    """Split PHM2012 runs by official set first, then random train/valid on Learning_set.
 
-    match = re.search(r"(Bearing\d+_\d+)", run.bearing_id, flags=re.IGNORECASE)
-    if match is None:
-        return run.bearing_id
-    name = match.group(1)
-    return name[0].upper() + name[1:]
+    - Learning_set -> train + validation
+    - Test_set -> test only
 
+    Sliding windows from one run remain within a single split because splitting is
+    performed at run level before windowing.
+    """
 
-def split_by_fixed_bearings(runs: Sequence[BearingRun]) -> Tuple[List[BearingRun], List[BearingRun], List[BearingRun]]:
-    """Split runs by fixed PHM2012 bearing IDs (train/valid/test)."""
+    learning_runs = [r for r in runs if r.split == "Learning_set"]
+    test_runs = [r for r in runs if r.split == "Test_set"]
 
-    train_runs: List[BearingRun] = []
-    valid_runs: List[BearingRun] = []
-    test_runs: List[BearingRun] = []
+    if not learning_runs:
+        # Fallback for non-standard mirrors without split labels.
+        learning_runs = list(runs)
+        test_runs = []
 
-    for run in runs:
-        bname = _canonical_bearing_name(run)
-        if bname in TRAIN_BEARINGS:
-            train_runs.append(run)
-        elif bname in VALID_BEARINGS:
-            valid_runs.append(run)
-        elif bname in TEST_BEARINGS:
-            test_runs.append(run)
+    shuffled = list(learning_runs)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(shuffled)
+
+    valid_size = max(1, int(len(shuffled) * valid_ratio))
+    valid_runs = shuffled[:valid_size]
+    train_runs = shuffled[valid_size:]
+
+    if not train_runs:
+        train_runs, valid_runs = valid_runs, train_runs
 
     return train_runs, valid_runs, test_runs
 
@@ -286,6 +287,11 @@ def _runs_to_samples(
         sensors = run.frame[cols].to_numpy(dtype=np.float32)
         sensors = scaler.transform(sensors)
 
+        # Per-run per-sensor z-score normalization before windowing.
+        mean = np.mean(sensors, axis=0, keepdims=True)
+        std = np.std(sensors, axis=0, keepdims=True) + 1e-6
+        sensors = (sensors - mean) / std
+
         if sensors.shape[1] != sensor_dim:
             raise RuntimeError(
                 f"Sensor dimension mismatch for run {run.bearing_id}: "
@@ -361,21 +367,15 @@ def prepare_datasets(
     root = Path(dataset_root)
     runs = load_all_bearings(root)
 
-    train_runs, valid_runs, test_runs = split_by_fixed_bearings(runs)
+    train_runs, valid_runs, test_runs = split_official_learning_test(
+        runs=runs,
+        valid_ratio=valid_ratio,
+        seed=seed,
+    )
 
-    # Fallback for non-standard mirrors: keep old split logic if fixed IDs are unavailable.
-    if not train_runs or not valid_runs:
-        learning_runs = [r for r in runs if r.split == "Learning_set"]
-        test_runs = [r for r in runs if r.split == "Test_set"]
-        if not learning_runs:
-            learning_runs = runs
-            test_runs = []
-
-        shuffled = list(learning_runs)
-        rng = np.random.default_rng(seed)
-        rng.shuffle(shuffled)
-        cut = max(1, int(len(shuffled) * (1.0 - valid_ratio)))
-        train_runs, valid_runs = shuffled[:cut], shuffled[cut:]
+    print("Train runs:", [r.bearing_id for r in train_runs])
+    print("Valid runs:", [r.bearing_id for r in valid_runs])
+    print("Test runs:", [r.bearing_id for r in test_runs])
 
     scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim)
 

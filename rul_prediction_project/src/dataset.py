@@ -224,7 +224,13 @@ def build_sliding_windows(
 
     starts = np.arange(0, n_cycles - window_size + 1, stride, dtype=np.int32)
     windows = np.stack([series[s : s + window_size] for s in starts], axis=0).astype(np.float32)
-    labels = rul[starts + window_size - 1].astype(np.float32)
+
+    rul_norm = rul.astype(np.float32)
+    max_rul = float(np.max(rul_norm)) if rul_norm.size else 1.0
+    if max_rul > 0:
+        rul_norm = rul_norm / max_rul
+
+    labels = rul_norm[starts + window_size - 1].astype(np.float32)
     return windows, labels
 
 
