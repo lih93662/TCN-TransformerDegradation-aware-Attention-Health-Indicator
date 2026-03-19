@@ -12,6 +12,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class DegradationAwareAttention(nn.Module):
@@ -31,6 +32,7 @@ class DegradationAwareAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
+        self.input_norm = nn.LayerNorm(embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
@@ -70,10 +72,13 @@ class DegradationAwareAttention(nn.Module):
         """
 
         b, t, _ = x.shape
-        q = self._split_heads(self.q_proj(x))
-        k = self._split_heads(self.k_proj(x))
-        v = self._split_heads(self.v_proj(x))
+        x_norm = self.input_norm(x)
+        q = self._split_heads(self.q_proj(x_norm))
+        k = self._split_heads(self.k_proj(x_norm))
+        v = self._split_heads(self.v_proj(x_norm))
 
+        q = F.normalize(q, p=2.0, dim=-1)
+        k = F.normalize(k, p=2.0, dim=-1)
         logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
 
         # Late-life bias: linearly increasing over keys.

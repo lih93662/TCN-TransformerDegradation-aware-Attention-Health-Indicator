@@ -287,11 +287,6 @@ def _runs_to_samples(
         sensors = run.frame[cols].to_numpy(dtype=np.float32)
         sensors = scaler.transform(sensors)
 
-        # Per-run per-sensor z-score normalization before windowing.
-        mean = np.mean(sensors, axis=0, keepdims=True)
-        std = np.std(sensors, axis=0, keepdims=True) + 1e-6
-        sensors = (sensors - mean) / std
-
         if sensors.shape[1] != sensor_dim:
             raise RuntimeError(
                 f"Sensor dimension mismatch for run {run.bearing_id}: "
@@ -312,6 +307,7 @@ def _runs_to_samples(
             rul=rul,
             window_size=window_size,
             stride=stride,
+            max_rul=float(max_rul),
         )
         if x.shape[0] == 0:
             continue
