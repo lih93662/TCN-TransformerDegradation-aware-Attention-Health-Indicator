@@ -78,6 +78,7 @@ class PreparedData:
     scaler: StandardScaler
     feature_dim: int
     detected_sensor_columns: List[str]
+    target_scale: float
 
 
 
@@ -119,11 +120,11 @@ def split_official_learning_test(
 
 
 def compute_linear_rul(cycles: np.ndarray, max_rul: int = 125) -> np.ndarray:
-    """Compute clipped linear RUL labels.
+    """Compute linear RUL labels, optionally with clipping.
 
     Formula:
         RUL = max_cycle - current_cycle
-        RUL = clip(RUL, 0, max_rul)
+        If ``max_rul > 0``: RUL = clip(RUL, 0, max_rul)
 
     Args:
         cycles: Cycle index array with shape ``(num_cycles,)``.
@@ -134,8 +135,30 @@ def compute_linear_rul(cycles: np.ndarray, max_rul: int = 125) -> np.ndarray:
     """
 
     max_cycle = int(np.max(cycles))
-    rul = max_cycle - cycles
-    return np.clip(rul, 0, max_rul).astype(np.float32)
+    rul = (max_cycle - cycles).astype(np.float32)
+    if max_rul is not None and int(max_rul) > 0:
+        rul = np.clip(rul, 0, max_rul)
+    return rul.astype(np.float32)
+
+
+def compute_target_scale(train_runs: Sequence[BearingRun], max_rul: int) -> float:
+    """Compute a fixed target normalization scale from training runs only.
+
+    If ``max_rul > 0``, the configured cap is used.
+    Otherwise, the maximum unclipped training RUL is used so labels preserve the
+    full degradation slope without per-run normalization.
+    """
+
+    if max_rul is not None and int(max_rul) > 0:
+        return float(max_rul)
+
+    maxima: List[float] = []
+    for run in train_runs:
+        cycles = run.frame["cycle"].to_numpy(dtype=np.int32)
+        maxima.append(float(np.max(compute_linear_rul(cycles, max_rul=0))))
+    if not maxima:
+        raise RuntimeError("No training runs available to compute target scale.")
+    return float(max(maxima))
 
 
 def _stable_int_hash(text: str) -> int:
@@ -255,6 +278,7 @@ def _runs_to_samples(
     window_size: int,
     stride: int,
     max_rul: int,
+    label_scale: float,
     sensor_dim: int,
     max_windows_per_bearing: int,
     seed: int,
@@ -307,7 +331,7 @@ def _runs_to_samples(
             rul=rul,
             window_size=window_size,
             stride=stride,
-            max_rul=float(max_rul),
+            label_scale=float(label_scale),
         )
         if x.shape[0] == 0:
             continue
@@ -374,6 +398,7 @@ def prepare_datasets(
     print("Test runs:", [r.bearing_id for r in test_runs])
 
     scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim)
+    target_scale = compute_target_scale(train_runs, max_rul=max_rul)
 
     x_train, y_train, id_train = _runs_to_samples(
         runs=train_runs,
@@ -381,6 +406,7 @@ def prepare_datasets(
         window_size=window_size,
         stride=stride,
         max_rul=max_rul,
+        label_scale=target_scale,
         sensor_dim=sensor_dim,
         max_windows_per_bearing=max_windows_per_bearing,
         seed=seed,
@@ -391,6 +417,7 @@ def prepare_datasets(
         window_size=window_size,
         stride=stride,
         max_rul=max_rul,
+        label_scale=target_scale,
         sensor_dim=sensor_dim,
         max_windows_per_bearing=max_windows_per_bearing,
         seed=seed,
@@ -401,6 +428,7 @@ def prepare_datasets(
         window_size=window_size,
         stride=stride,
         max_rul=max_rul,
+        label_scale=target_scale,
         sensor_dim=sensor_dim,
         max_windows_per_bearing=max_windows_per_bearing,
         seed=seed,
@@ -426,6 +454,7 @@ def prepare_datasets(
         scaler=scaler,
         feature_dim=x_train.shape[-1],
         detected_sensor_columns=detected_cols,
+        target_scale=target_scale,
     )
 
 
@@ -445,4 +474,5 @@ def summarize_dataset(prepared: PreparedData) -> Dict[str, object]:
         "test_samples": len(prepared.test_dataset),
         "num_sensors": prepared.feature_dim,
         "detected_sensor_columns": prepared.detected_sensor_columns,
+        "target_scale": prepared.target_scale,
     }

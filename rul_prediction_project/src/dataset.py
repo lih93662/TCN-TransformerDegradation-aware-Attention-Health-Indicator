@@ -213,12 +213,12 @@ def build_sliding_windows(
     rul: np.ndarray,
     window_size: int,
     stride: int,
-    max_rul: float | None = None,
+    label_scale: float | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert one bearing sequence into overlapping windows.
 
     Labels are sequence-to-one targets taken from the final cycle of each window.
-    If ``max_rul`` is provided, labels are normalized by that fixed global cap.
+    If ``label_scale`` is provided, labels are normalized by that fixed global scale.
     """
 
     n_cycles = int(series.shape[0])
@@ -231,8 +231,8 @@ def build_sliding_windows(
     windows = np.stack([series[s : s + window_size] for s in starts], axis=0).astype(np.float32)
 
     rul_norm = rul.astype(np.float32)
-    if max_rul is not None and float(max_rul) > 0:
-        rul_norm = rul_norm / float(max_rul)
+    if label_scale is not None and float(label_scale) > 0:
+        rul_norm = rul_norm / float(label_scale)
 
     labels = rul_norm[starts + window_size - 1].astype(np.float32)
     return windows, labels

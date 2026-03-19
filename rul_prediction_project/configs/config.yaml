@@ -6,7 +6,7 @@ data:
   dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
   window_size: 64
   stride: 2
-  max_rul: 125
+  max_rul: 0
   valid_ratio: 0.33
 
 model:
