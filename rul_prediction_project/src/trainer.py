@@ -23,7 +23,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .evaluator import evaluate_model
-from .loss import CompositeRULLoss
+from .visualization import plot_rul_curve
+from .loss import RawRegressionLoss
 
 
 @dataclass
@@ -38,7 +39,9 @@ class TrainerConfig:
     grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
-    weight_decay: float = 1e-4
+    weight_decay: float = 0.0
+    loss_name: str = "mse"
+    collapse_std_threshold: float = 1e-4
 
 
 class Trainer:
@@ -66,7 +69,7 @@ class Trainer:
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.criterion = CompositeRULLoss(rmse_weight=1.0, mae_weight=0.3)
+        self.criterion = RawRegressionLoss(mode=config.loss_name)
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
@@ -80,6 +83,10 @@ class Trainer:
         self.attn_stats_csv = self.logs_dir / "attention_epoch_stats.csv"
         self.attn_dir = self.logs_dir / "attention_maps"
         self.attn_dir.mkdir(parents=True, exist_ok=True)
+        self.pred_dir = self.logs_dir / "raw_predictions"
+        self.pred_dir.mkdir(parents=True, exist_ok=True)
+        self.curve_dir = self.logs_dir / "prediction_curves"
+        self.curve_dir.mkdir(parents=True, exist_ok=True)
 
         self.history: List[Dict[str, float]] = []
         self.best_val_total = float("inf")
@@ -224,6 +231,94 @@ class Trainer:
 
         return metrics, batch_rows, attn_stats, attn_avg
 
+    def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Collect raw predictions/targets/ids without any post-processing."""
+
+        preds: List[np.ndarray] = []
+        trues: List[np.ndarray] = []
+        ids: List[str] = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                x = batch["x"].to(self.device)
+                y = batch["y"].to(self.device)
+                out = self.model(x)
+                preds.append(out["pred"].detach().cpu().numpy().reshape(-1))
+                trues.append(y.detach().cpu().numpy().reshape(-1))
+                ids.extend(list(batch["id"]))
+
+        if not preds:
+            return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32), []
+
+        return (
+            np.concatenate(preds).astype(np.float32),
+            np.concatenate(trues).astype(np.float32),
+            ids,
+        )
+
+    def _save_prediction_debug(self, epoch: int, phase: str, loader: DataLoader) -> Dict[str, float]:
+        """Save raw per-sample predictions and plot unsmoothed curves."""
+
+        pred, true, ids = self._collect_predictions(loader)
+        csv_path = self.pred_dir / f"epoch_{epoch:03d}_{phase}.csv"
+        rows = []
+        for idx, (bearing_id, y_true, y_pred) in enumerate(zip(ids, true, pred)):
+            rows.append(
+                {
+                    "epoch": epoch,
+                    "phase": phase,
+                    "sample_index": idx,
+                    "bearing_id": bearing_id,
+                    "true_rul": float(y_true),
+                    "pred_rul": float(y_pred),
+                    "error": float(y_pred - y_true),
+                }
+            )
+        self._append_rows_csv(csv_path, rows)
+
+        stats = {
+            "pred_mean": float(np.mean(pred)) if len(pred) else float("nan"),
+            "pred_std": float(np.std(pred)) if len(pred) else float("nan"),
+            "true_mean": float(np.mean(true)) if len(true) else float("nan"),
+            "true_std": float(np.std(true)) if len(true) else float("nan"),
+        }
+
+        if len(pred):
+            plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
+            seen = []
+            for bearing_id in ids:
+                if bearing_id not in seen:
+                    seen.append(bearing_id)
+                if len(seen) >= 3:
+                    break
+            for bearing_id in seen:
+                idx = [i for i, bid in enumerate(ids) if bid == bearing_id]
+                plot_rul_curve(
+                    true[idx],
+                    pred[idx],
+                    self.curve_dir / f"epoch_{epoch:03d}_{phase}_{bearing_id}.png",
+                )
+
+        if len(pred) and stats["pred_std"] < self.config.collapse_std_threshold:
+            self.logger.warning(
+                "Prediction collapse detected for %s epoch %03d: pred_std=%.8f",
+                phase,
+                epoch,
+                stats["pred_std"],
+            )
+
+        self.logger.info(
+            "%s epoch %03d raw prediction stats | pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f",
+            phase.title(),
+            epoch,
+            stats["pred_mean"],
+            stats["pred_std"],
+            stats["true_mean"],
+            stats["true_std"],
+        )
+        return stats
+
     def _save_checkpoint(self, epoch: int, valid_total: float, valid_rmse: float) -> None:
         """Persist best checkpoint payload."""
 
@@ -270,7 +365,15 @@ class Trainer:
             if va_attn_avg is not None:
                 np.save(self.attn_dir / f"epoch_{epoch:03d}_valid.npy", va_attn_avg)
 
-            epoch_row = {**tr, **va, "epoch": epoch, "lr": self.optimizer.param_groups[0]["lr"]}
+            valid_pred_stats = self._save_prediction_debug(epoch, "valid", valid_loader)
+
+            epoch_row = {
+                **tr,
+                **va,
+                **valid_pred_stats,
+                "epoch": epoch,
+                "lr": self.optimizer.param_groups[0]["lr"],
+            }
             self.history.append(epoch_row)
 
             self.logger.info(
@@ -351,6 +454,7 @@ class Trainer:
             )
 
         test_loader = self._make_loader(test_dataset, shuffle=False)
+        self._save_prediction_debug(0, "test", test_loader)
         result = evaluate_model(self.model, test_loader, self.device)
         metrics = {
             "rmse": result.rmse,

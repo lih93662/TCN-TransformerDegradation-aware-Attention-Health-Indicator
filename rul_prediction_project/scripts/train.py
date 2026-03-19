@@ -82,7 +82,8 @@ def main() -> None:
         grad_clip_norm=float(train_cfg_raw.get("grad_clip_norm", 0.0)),
         scheduler_factor=float(train_cfg_raw.get("scheduler_factor", 0.5)),
         scheduler_patience=int(train_cfg_raw.get("scheduler_patience", 3)),
-        weight_decay=float(train_cfg_raw.get("weight_decay", 1e-4)),
+        weight_decay=float(train_cfg_raw.get("weight_decay", 0.0)),
+        loss_name=str(train_cfg_raw.get("loss_name", "mse")),
     )
 
     device = get_device()

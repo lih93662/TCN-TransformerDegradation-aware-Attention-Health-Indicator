@@ -41,20 +41,23 @@ class LossOutput:
     mae: torch.Tensor
 
 
-class CompositeRULLoss(nn.Module):
-    """Weighted sum of RMSE and MAE."""
+class RawRegressionLoss(nn.Module):
+    """Raw regression supervision using either MSE or MAE only."""
 
-    def __init__(self, rmse_weight: float = 1.0, mae_weight: float = 0.3):
+    def __init__(self, mode: str = "mse"):
         super().__init__()
-        self.rmse = RMSELoss()
-        self.mae = MAELoss()
-        self.rmse_weight = rmse_weight
-        self.mae_weight = mae_weight
+        mode = str(mode).lower()
+        if mode not in {"mse", "mae"}:
+            raise ValueError(f"Unsupported regression loss mode: {mode}")
+        self.mode = mode
+        self.mse = nn.MSELoss()
+        self.mae = nn.L1Loss()
+        self.rmse_metric = RMSELoss()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> LossOutput:
-        rmse = self.rmse(pred, target)
+        total = self.mse(pred, target) if self.mode == "mse" else self.mae(pred, target)
+        rmse = self.rmse_metric(pred, target)
         mae = self.mae(pred, target)
-        total = self.rmse_weight * rmse + self.mae_weight * mae
         return LossOutput(total=total, rmse=rmse, mae=mae)
 
 
