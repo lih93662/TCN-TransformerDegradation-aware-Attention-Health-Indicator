@@ -1,0 +1,11 @@
+[
+  {
+    "experiment": "A_backbone_only",
+    "config": "configs/config_backbone.yaml",
+    "command": "/root/.pyenv/versions/3.10.19/bin/python scripts/train.py --config configs/config_backbone.yaml",
+    "output_dir": "outputs/experiments/ablation_backbone_only",
+    "checkpoint": "outputs/experiments/ablation_backbone_only/checkpoints/best_model.pth",
+    "returncode": 1,
+    "status": "failed"
+  }
+]

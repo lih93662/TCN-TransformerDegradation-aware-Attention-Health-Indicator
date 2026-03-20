@@ -118,7 +118,9 @@ def export_attention_samples(
 
 
 def run_single_evaluation(cfg: Dict, seed: int, run_name: str, checkpoint_override: str | None, multi_seed: bool, attention_samples: int) -> Dict[str, float]:
-    paths = ensure_project_paths(ROOT, run_name if multi_seed else None)
+    exp_cfg = cfg.get("experiment", {})
+    use_run_name_dir = bool(exp_cfg.get("use_run_name_dir", multi_seed))
+    paths = ensure_project_paths(ROOT, run_name if use_run_name_dir else None)
     logger = configure_logging(paths["logs"] / "evaluate.log")
     set_seed(seed)
 

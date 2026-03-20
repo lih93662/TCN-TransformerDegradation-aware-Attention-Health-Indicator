@@ -81,7 +81,9 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
 
 
 def run_single_seed(cfg: Dict, seed: int, run_name: str, multi_seed: bool) -> Dict[str, float]:
-    project_paths = ensure_project_paths(ROOT, run_name if multi_seed else None)
+    exp_cfg = cfg.get("experiment", {})
+    use_run_name_dir = bool(exp_cfg.get("use_run_name_dir", multi_seed))
+    project_paths = ensure_project_paths(ROOT, run_name if use_run_name_dir else None)
     logger = configure_logging(project_paths["logs"] / "train.log")
     set_seed(seed)
 

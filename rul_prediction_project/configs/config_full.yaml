@@ -1,0 +1,49 @@
+experiment:
+  name: ablation_full
+  seed: 42
+  seeds: [42]
+  use_run_name_dir: true
+
+data:
+  dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
+  window_size: 64
+  stride: 2
+  max_rul: 0
+  valid_ratio: 0.33
+  sensor_dim: 2
+  max_windows_per_bearing: 20000
+
+model:
+  tcn_channels: 64
+  tcn_kernel_size: 3
+  tcn_dilations: [1, 2, 4, 8]
+  transformer_embed_dim: 128
+  transformer_heads: 4
+  transformer_layers: 2
+  transformer_ffn_dim: 256
+  dropout: 0.3
+  attention_mode: "degradation"
+  attention_temperature: 0.8
+  attention_use_qk_norm: false
+  attention_bias_scale: 1.5
+  prediction_activation: "identity"
+
+train:
+  lr: 0.0001
+  batch_size: 32
+  epochs: 80
+  num_workers: 0
+  early_stopping_patience: 20
+  grad_clip_norm: 1.0
+  scheduler_factor: 0.5
+  scheduler_patience: 3
+  scheduler_min_lr: 0.000001
+  weight_decay: 0.0001
+  loss_name: "mse_mae"
+  loss_mse_weight: 1.0
+  loss_mae_weight: 0.5
+  loss_huber_delta: 0.2
+  bias_regularization_weight: 0.05
+
+evaluation:
+  attention_samples: 3
