@@ -1,6 +1,7 @@
 experiment:
   name: tcn_transformer_degradation_attention_hi
   seed: 42
+  seeds: [42]
 
 data:
   dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
@@ -8,6 +9,8 @@ data:
   stride: 2
   max_rul: 0
   valid_ratio: 0.33
+  sensor_dim: 2
+  max_windows_per_bearing: 20000
 
 model:
   tcn_channels: 64
@@ -18,6 +21,11 @@ model:
   transformer_layers: 2
   transformer_ffn_dim: 256
   dropout: 0.3
+  attention_mode: "degradation"   # choices: none, degradation
+  attention_temperature: 0.8
+  attention_use_qk_norm: false
+  attention_bias_scale: 1.5
+  prediction_activation: "identity"  # choices: identity, relu, softplus, sigmoid, tanh
 
 train:
   lr: 0.0001
@@ -28,5 +36,13 @@ train:
   grad_clip_norm: 1.0
   scheduler_factor: 0.5
   scheduler_patience: 3
-  weight_decay: 0.0
-  loss_name: "mse"
+  scheduler_min_lr: 0.000001
+  weight_decay: 0.0001
+  loss_name: "mse_mae"            # choices: mse, mae, huber, mse_mae
+  loss_mse_weight: 1.0
+  loss_mae_weight: 0.5
+  loss_huber_delta: 0.2
+  bias_regularization_weight: 0.05
+
+evaluation:
+  attention_samples: 3

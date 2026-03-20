@@ -1,12 +1,4 @@
-"""Training loop implementation for hybrid RUL model.
-
-This module provides:
-- GPU-aware training/validation loops.
-- Best-checkpoint saving.
-- Epoch-level structured logs.
-- Early stopping based on validation RMSE to reduce overfitting.
-- Per-batch loss CSV logging and epoch attention diagnostics.
-"""
+"""Training loop implementation for hybrid RUL model."""
 
 from __future__ import annotations
 
@@ -23,8 +15,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .evaluator import evaluate_model
+from .loss import RegressionLoss
 from .visualization import plot_rul_curve
-from .loss import RawRegressionLoss
 
 
 @dataclass
@@ -39,18 +31,18 @@ class TrainerConfig:
     grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
+    scheduler_min_lr: float = 1e-6
     weight_decay: float = 0.0
     loss_name: str = "mse"
+    loss_mse_weight: float = 1.0
+    loss_mae_weight: float = 0.3
+    loss_huber_delta: float = 1.0
+    bias_regularization_weight: float = 0.0
     collapse_std_threshold: float = 1e-4
 
 
 class Trainer:
-    """Encapsulated trainer with checkpointing and early stopping.
-
-    Early stopping behavior:
-    - Monitors ``valid_rmse``.
-    - Stops if it does not improve for ``patience`` epochs.
-    """
+    """Encapsulated trainer with checkpointing and early stopping."""
 
     def __init__(
         self,
@@ -69,17 +61,24 @@ class Trainer:
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.criterion = RawRegressionLoss(mode=config.loss_name)
+        self.criterion = RegressionLoss(
+            mode=config.loss_name,
+            mse_weight=config.loss_mse_weight,
+            mae_weight=config.loss_mae_weight,
+            huber_delta=config.loss_huber_delta,
+            bias_weight=config.bias_regularization_weight,
+        )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="min",
             factor=config.scheduler_factor,
             patience=config.scheduler_patience,
-            min_lr=1e-6,
+            min_lr=config.scheduler_min_lr,
         )
 
         self.batch_loss_csv = self.logs_dir / "batch_loss_log.csv"
+        self.epoch_summary_csv = self.logs_dir / "epoch_summary.csv"
         self.attn_stats_csv = self.logs_dir / "attention_epoch_stats.csv"
         self.attn_dir = self.logs_dir / "attention_maps"
         self.attn_dir.mkdir(parents=True, exist_ok=True)
@@ -91,11 +90,10 @@ class Trainer:
         self.history: List[Dict[str, float]] = []
         self.best_val_total = float("inf")
         self.best_val_rmse = float("inf")
+        self.best_epoch = 0
         self.no_improve_epochs = 0
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
-        """Create dataloader with consistent options."""
-
         return DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -116,18 +114,36 @@ class Trainer:
                 writer.writeheader()
             writer.writerows(rows)
 
-    def _run_epoch(self, loader: DataLoader, epoch: int, train: bool) -> Tuple[Dict[str, float], List[Dict[str, float]], Dict[str, float], np.ndarray | None]:
-        """Run one train/validation epoch and return metrics + diagnostics."""
+    @staticmethod
+    def _aggregate_attention(attn: torch.Tensor | None) -> tuple[float, float, float, float, np.ndarray | None]:
+        if attn is None:
+            return float("nan"), float("nan"), float("nan"), float("nan"), None
+        attn_min = float(attn.min().item())
+        attn_max = float(attn.max().item())
+        attn_mean = float(attn.mean().item())
+        attn_std = float(attn.std().item())
+        attn_avg = attn.detach().mean(dim=0)
+        while attn_avg.ndim > 2:
+            attn_avg = attn_avg.mean(dim=0)
+        return attn_min, attn_max, attn_mean, attn_std, attn_avg.cpu().numpy().astype(np.float32)
 
+    def _run_epoch(
+        self,
+        loader: DataLoader,
+        epoch: int,
+        train: bool,
+    ) -> Tuple[Dict[str, float], List[Dict[str, float]], Dict[str, float], np.ndarray | None]:
         mode = "train" if train else "valid"
-        if train:
-            self.model.train()
-        else:
-            self.model.eval()
+        self.model.train(mode=train)
 
         total_loss = 0.0
+        total_primary = 0.0
         total_rmse = 0.0
         total_mae = 0.0
+        total_mean_error = 0.0
+        total_bias_penalty = 0.0
+        total_pred_mean = 0.0
+        total_true_mean = 0.0
         batch_rows: List[Dict[str, float]] = []
 
         attn_min_sum = 0.0
@@ -149,38 +165,42 @@ class Trainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 out = self.model(x)
-                loss_out = self.criterion(out["pred"], y)
+                pred = out["pred"]
+                loss_out = self.criterion(pred, y)
 
                 if train:
                     loss_out.total.backward()
                     grad_norm = float("nan")
                     if self.config.grad_clip_norm and self.config.grad_clip_norm > 0:
-                        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm).item())
+                        grad_norm = float(
+                            torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(), self.config.grad_clip_norm
+                            ).item()
+                        )
                     self.optimizer.step()
                 else:
                     grad_norm = float("nan")
 
+                pred_mean = float(pred.mean().item())
+                true_mean = float(y.mean().item())
                 total_loss += float(loss_out.total.item())
+                total_primary += float(loss_out.primary.item())
                 total_rmse += float(loss_out.rmse.item())
                 total_mae += float(loss_out.mae.item())
+                total_mean_error += float(loss_out.mean_error.item())
+                total_bias_penalty += float(loss_out.bias_penalty.item())
+                total_pred_mean += pred_mean
+                total_true_mean += true_mean
 
                 attn = out.get("attn_map")
-                if attn is not None:
-                    attn_min = float(attn.min().item())
-                    attn_max = float(attn.max().item())
-                    attn_mean = float(attn.mean().item())
-                    attn_std = float(attn.std().item())
+                attn_min, attn_max, attn_mean, attn_std, attn_avg = self._aggregate_attention(attn)
+                if attn_avg is not None:
                     attn_min_sum += attn_min
                     attn_max_sum += attn_max
                     attn_mean_sum += attn_mean
                     attn_std_sum += attn_std
                     attn_batches += 1
-
-                    attn_2d = attn.detach().mean(dim=(0, 1)).cpu().numpy().astype(np.float32)
-                    attn_map_sum = attn_2d if attn_map_sum is None else (attn_map_sum + attn_2d)
-                else:
-                    attn_min = float("nan")
-                    attn_max = float("nan")
+                    attn_map_sum = attn_avg if attn_map_sum is None else (attn_map_sum + attn_avg)
 
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 batch_rows.append(
@@ -189,11 +209,18 @@ class Trainer:
                         "phase": mode,
                         "batch": batch_idx,
                         "total_loss": float(loss_out.total.item()),
+                        "primary_loss": float(loss_out.primary.item()),
                         "rmse": float(loss_out.rmse.item()),
                         "mae": float(loss_out.mae.item()),
+                        "mean_error": float(loss_out.mean_error.item()),
+                        "bias_penalty": float(loss_out.bias_penalty.item()),
+                        "pred_mean": pred_mean,
+                        "true_mean": true_mean,
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
+                        "attn_mean": attn_mean,
+                        "attn_std": attn_std,
                         "grad_norm": grad_norm,
                     }
                 )
@@ -202,17 +229,20 @@ class Trainer:
                     {
                         "total": f"{loss_out.total.item():.4f}",
                         "rmse": f"{loss_out.rmse.item():.4f}",
-                        "mae": f"{loss_out.mae.item():.4f}",
-                        "attn_min": f"{attn_min:.3f}" if np.isfinite(attn_min) else "nan",
-                        "attn_max": f"{attn_max:.3f}" if np.isfinite(attn_max) else "nan",
+                        "bias": f"{loss_out.mean_error.item():+.4f}",
                     }
                 )
 
         n = max(1, len(loader))
         metrics = {
             f"{mode}_total": total_loss / n,
+            f"{mode}_primary": total_primary / n,
             f"{mode}_rmse": total_rmse / n,
             f"{mode}_mae": total_mae / n,
+            f"{mode}_mean_error": total_mean_error / n,
+            f"{mode}_bias_penalty": total_bias_penalty / n,
+            f"{mode}_pred_mean": total_pred_mean / n,
+            f"{mode}_true_mean": total_true_mean / n,
         }
 
         attn_stats = {
@@ -232,8 +262,6 @@ class Trainer:
         return metrics, batch_rows, attn_stats, attn_avg
 
     def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Collect raw predictions/targets/ids without any post-processing."""
-
         preds: List[np.ndarray] = []
         trues: List[np.ndarray] = []
         ids: List[str] = []
@@ -251,15 +279,9 @@ class Trainer:
         if not preds:
             return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32), []
 
-        return (
-            np.concatenate(preds).astype(np.float32),
-            np.concatenate(trues).astype(np.float32),
-            ids,
-        )
+        return np.concatenate(preds).astype(np.float32), np.concatenate(trues).astype(np.float32), ids
 
     def _save_prediction_debug(self, epoch: int, phase: str, loader: DataLoader) -> Dict[str, float]:
-        """Save raw per-sample predictions and plot unsmoothed curves."""
-
         pred, true, ids = self._collect_predictions(loader)
         csv_path = self.pred_dir / f"epoch_{epoch:03d}_{phase}.csv"
         rows = []
@@ -282,6 +304,7 @@ class Trainer:
             "pred_std": float(np.std(pred)) if len(pred) else float("nan"),
             "true_mean": float(np.mean(true)) if len(true) else float("nan"),
             "true_std": float(np.std(true)) if len(true) else float("nan"),
+            "mean_error": float(np.mean(pred - true)) if len(pred) else float("nan"),
         }
 
         if len(pred):
@@ -309,19 +332,21 @@ class Trainer:
             )
 
         self.logger.info(
-            "%s epoch %03d raw prediction stats | pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f",
+            (
+                "%s epoch %03d raw prediction stats | pred mean/std %.6f/%.6f | "
+                "true mean/std %.6f/%.6f | mean error %+ .6f"
+            ),
             phase.title(),
             epoch,
             stats["pred_mean"],
             stats["pred_std"],
             stats["true_mean"],
             stats["true_std"],
+            stats["mean_error"],
         )
         return stats
 
     def _save_checkpoint(self, epoch: int, valid_total: float, valid_rmse: float) -> None:
-        """Persist best checkpoint payload."""
-
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "epoch": epoch,
@@ -334,8 +359,6 @@ class Trainer:
         torch.save(payload, self.checkpoint_path)
 
     def fit(self, train_dataset, valid_dataset) -> List[Dict[str, float]]:
-        """Execute training loop with early stopping and return history."""
-
         train_loader = self._make_loader(train_dataset, shuffle=True)
         valid_loader = self._make_loader(valid_dataset, shuffle=False)
 
@@ -375,25 +398,27 @@ class Trainer:
                 "lr": self.optimizer.param_groups[0]["lr"],
             }
             self.history.append(epoch_row)
+            self._append_rows_csv(self.epoch_summary_csv, [epoch_row])
 
             self.logger.info(
                 (
-                    "Epoch %03d | lr %.6f | train_total %.4f train_rmse %.4f train_mae %.4f | "
-                    "valid_total %.4f valid_rmse %.4f valid_mae %.4f"
+                    "Epoch %03d | lr %.6f | train_total %.4f train_rmse %.4f train_mae %.4f train_bias %+ .4f | "
+                    "valid_total %.4f valid_rmse %.4f valid_mae %.4f valid_bias %+ .4f"
                 ),
                 epoch,
                 self.optimizer.param_groups[0]["lr"],
                 tr["train_total"],
                 tr["train_rmse"],
                 tr["train_mae"],
+                tr["train_mean_error"],
                 va["valid_total"],
                 va["valid_rmse"],
                 va["valid_mae"],
+                va["valid_mean_error"],
             )
             self.logger.info(
                 (
-                    "Epoch %03d attention stats | "
-                    "train min/max %.5f/%.5f mean/std %.5f/%.5f | "
+                    "Epoch %03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
                     "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
                 ),
                 epoch,
@@ -411,12 +436,11 @@ class Trainer:
 
             improved_total = va["valid_total"] < self.best_val_total
             improved_rmse = va["valid_rmse"] < self.best_val_rmse
-
             if improved_total:
                 self.best_val_total = va["valid_total"]
-
             if improved_rmse:
                 self.best_val_rmse = va["valid_rmse"]
+                self.best_epoch = epoch
                 self.no_improve_epochs = 0
                 self._save_checkpoint(epoch, self.best_val_total, self.best_val_rmse)
                 self.logger.info(
@@ -435,8 +459,9 @@ class Trainer:
 
             if self.no_improve_epochs >= self.config.early_stopping_patience:
                 self.logger.info(
-                    "Early stopping triggered at epoch %03d (best valid_rmse=%.4f)",
+                    "Early stopping triggered at epoch %03d (best epoch %03d, best valid_rmse=%.4f)",
                     epoch,
+                    self.best_epoch,
                     self.best_val_rmse,
                 )
                 break
@@ -444,14 +469,10 @@ class Trainer:
         return self.history
 
     def evaluate(self, test_dataset) -> Dict[str, float]:
-        """Evaluate best model checkpoint against test dataset."""
-
         if self.checkpoint_path.exists():
             payload = torch.load(self.checkpoint_path, map_location=self.device)
             self.model.load_state_dict(payload["model_state"])
-            self.logger.info(
-                "Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>")
-            )
+            self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 
         test_loader = self._make_loader(test_dataset, shuffle=False)
         self._save_prediction_debug(0, "test", test_loader)
@@ -459,12 +480,20 @@ class Trainer:
         metrics = {
             "rmse": result.rmse,
             "mae": result.mae,
+            "r2": result.r2,
             "phm_score": result.phm_score,
+            "pred_mean": result.pred_mean,
+            "pred_std": result.pred_std,
+            "true_mean": result.true_mean,
+            "true_std": result.true_std,
+            "mean_error": result.mean_error,
         }
         self.logger.info(
-            "Test metrics | RMSE %.4f | MAE %.4f | PHM Score %.4f",
+            "Test metrics | RMSE %.4f | MAE %.4f | R2 %.4f | PHM Score %.4f | bias %+ .4f",
             result.rmse,
             result.mae,
+            result.r2,
             result.phm_score,
+            result.mean_error,
         )
         return metrics

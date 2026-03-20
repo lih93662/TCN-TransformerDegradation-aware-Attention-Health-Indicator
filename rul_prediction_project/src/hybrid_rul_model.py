@@ -1,4 +1,4 @@
-"""Hybrid RUL architecture: TCN + Transformer + Degradation-Aware Attention + HI."""
+"""Hybrid RUL architecture: TCN + Transformer + optional attention + HI."""
 
 from __future__ import annotations
 
@@ -26,6 +26,11 @@ class ModelConfig:
     transformer_layers: int = 2
     transformer_ffn_dim: int = 256
     dropout: float = 0.1
+    attention_mode: str = "degradation"
+    attention_temperature: float = 1.0
+    attention_use_qk_norm: bool = False
+    attention_bias_scale: float = 1.0
+    prediction_activation: str = "identity"
 
 
 class HybridRULModel(nn.Module):
@@ -55,32 +60,24 @@ class HybridRULModel(nn.Module):
             embed_dim=cfg.transformer_embed_dim,
             num_heads=cfg.transformer_heads,
             dropout=cfg.dropout,
+            temperature=cfg.attention_temperature,
+            mode=cfg.attention_mode,
+            use_qk_norm=cfg.attention_use_qk_norm,
+            bias_scale=cfg.attention_bias_scale,
         )
 
-        fusion_input_dim = (
-            cfg.tcn_channels + cfg.transformer_embed_dim + cfg.transformer_embed_dim + 1
-        )
-        self.fusion = FusionMLP(fusion_input_dim)
-        self.rul_head = RULHead()
+        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + cfg.transformer_embed_dim + 1
+        self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
+        self.rul_head = RULHead(activation=cfg.prediction_activation)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        # Stage 1: TCN
         tcn_seq, tcn_pool = self.tcn(x)
-
-        # Stage 2: Transformer
         tr_seq, tr_pool = self.transformer(tcn_seq)
-
-        # HI module from raw input
         hi_score, hi_stats = self.hi(x)
-
-        # Stage 3: degradation-aware attention
         da_feat, attn_map = self.degradation_attention(tr_seq, hi_score)
 
-        # Stage 4: Feature fusion
         fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
         fused = self.fusion(fused)
-
-        # Stage 5: Prediction
         pred = self.rul_head(fused)
 
         return {
