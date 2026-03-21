@@ -1,0 +1,11 @@
+base_config: config.yaml
+
+experiment:
+  tag: ablation_backbone
+
+model:
+  use_attention: false
+
+train:
+  loss_name: "mse"
+  bias_regularization_weight: 0.0

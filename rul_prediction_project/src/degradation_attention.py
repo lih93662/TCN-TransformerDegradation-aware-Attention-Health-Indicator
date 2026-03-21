@@ -1,10 +1,4 @@
-"""Degradation-aware attention module.
-
-Core idea:
-    attention = softmax(QK^T / sqrt(d) + degradation_bias)
-where degradation_bias is derived from HI and temporal progression so that later
-life-cycle positions are weighted more under stronger degradation estimates.
-"""
+"""Degradation-aware temporal attention module."""
 
 from __future__ import annotations
 
@@ -12,18 +6,24 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class DegradationAwareAttention(nn.Module):
-    """Custom attention integrating health indicator and late-life prior."""
+    """Lightweight temporal attention integrating health indicator and recency prior.
+
+    Compared with the previous version, this module avoids forced L2-normalized
+    queries/keys, adds a configurable score temperature, and uses a second-stage
+    temporal pooling gate so the attended representation does not collapse into a
+    simple mean over time.
+    """
 
     def __init__(
         self,
         embed_dim: int,
         num_heads: int = 4,
         dropout: float = 0.1,
-        temperature: float = 0.5,
+        temperature: float = 1.0,
+        recency_strength: float = 0.5,
     ):
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -31,6 +31,9 @@ class DegradationAwareAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.scale = 1.0 / math.sqrt(self.head_dim)
+        self.temperature = max(float(temperature), 1e-4)
+        self.recency_strength = float(recency_strength)
 
         self.input_norm = nn.LayerNorm(embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
@@ -38,14 +41,20 @@ class DegradationAwareAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.hi_to_bias = nn.Sequential(
+        self.hi_to_head_bias = nn.Sequential(
             nn.Linear(1, 16),
             nn.ReLU(inplace=True),
             nn.Linear(16, num_heads),
             nn.Tanh(),
         )
+        self.hi_to_temporal_gate = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.ReLU(inplace=True),
+            nn.Linear(16, 1),
+            nn.Tanh(),
+        )
+        self.temporal_score = nn.Linear(embed_dim, 1)
         self.dropout = nn.Dropout(dropout)
-        self.temperature = float(temperature)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
@@ -59,16 +68,17 @@ class DegradationAwareAttention(nn.Module):
         self,
         x: torch.Tensor,
         hi_score: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass.
 
         Args:
-            x: Sequence feature (B, T, C)
-            hi_score: Scalar HI in [0,1], shape (B,1)
+            x: Sequence feature (B, T, C).
+            hi_score: Scalar HI in [0, 1], shape (B, 1).
 
         Returns:
             weighted_vector: (B, C)
             attn_weights: (B, H, T, T)
+            temporal_weights: (B, T)
         """
 
         b, t, _ = x.shape
@@ -77,22 +87,26 @@ class DegradationAwareAttention(nn.Module):
         k = self._split_heads(self.k_proj(x_norm))
         v = self._split_heads(self.v_proj(x_norm))
 
-        q = F.normalize(q, p=2.0, dim=-1)
-        k = F.normalize(k, p=2.0, dim=-1)
-        logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        logits = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
-        # Late-life bias: linearly increasing over keys.
-        life = torch.linspace(0, 1, steps=t, device=x.device, dtype=x.dtype)
-        life = life.view(1, 1, 1, t)
+        life = torch.linspace(0.0, 1.0, steps=t, device=x.device, dtype=x.dtype)
+        key_life = life.view(1, 1, 1, t)
+        temporal_life = life.view(1, t)
 
-        hi_gate = self.hi_to_bias(hi_score).view(b, self.num_heads, 1, 1)
-        degradation_bias = hi_gate * life
+        head_bias = self.hi_to_head_bias(hi_score).view(b, self.num_heads, 1, 1)
+        degradation_bias = self.recency_strength * head_bias * key_life
 
         scores = (logits + degradation_bias) / self.temperature
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
-        out = torch.matmul(attn, v)
-        out = self.out_proj(self._combine_heads(out))
 
-        weighted_vector = out.mean(dim=1)
-        return weighted_vector, attn
+        context = torch.matmul(attn, v)
+        context = self.out_proj(self._combine_heads(context))
+
+        temporal_logits = self.temporal_score(context).squeeze(-1)
+        temporal_logits = temporal_logits + self.recency_strength * self.hi_to_temporal_gate(hi_score) * temporal_life
+        temporal_weights = torch.softmax(temporal_logits / self.temperature, dim=-1)
+        temporal_weights = self.dropout(temporal_weights)
+
+        weighted_vector = torch.sum(context * temporal_weights.unsqueeze(-1), dim=1)
+        return weighted_vector, attn, temporal_weights

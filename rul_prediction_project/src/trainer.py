@@ -1,12 +1,4 @@
-"""Training loop implementation for hybrid RUL model.
-
-This module provides:
-- GPU-aware training/validation loops.
-- Best-checkpoint saving.
-- Epoch-level structured logs.
-- Early stopping based on validation RMSE to reduce overfitting.
-- Per-batch loss CSV logging and epoch attention diagnostics.
-"""
+"""Training loop implementation for hybrid RUL model."""
 
 from __future__ import annotations
 
@@ -23,8 +15,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .evaluator import evaluate_model
+from .loss import RawRegressionLoss, compute_regression_metrics
+from .utils import save_csv_rows, save_json
 from .visualization import plot_rul_curve
-from .loss import RawRegressionLoss
 
 
 @dataclass
@@ -41,16 +34,15 @@ class TrainerConfig:
     scheduler_patience: int = 3
     weight_decay: float = 0.0
     loss_name: str = "mse"
+    loss_mse_weight: float = 1.0
+    loss_mae_weight: float = 0.3
+    huber_delta: float = 0.1
+    bias_regularization_weight: float = 0.0
     collapse_std_threshold: float = 1e-4
 
 
 class Trainer:
-    """Encapsulated trainer with checkpointing and early stopping.
-
-    Early stopping behavior:
-    - Monitors ``valid_rmse``.
-    - Stops if it does not improve for ``patience`` epochs.
-    """
+    """Encapsulated trainer with checkpointing and early stopping."""
 
     def __init__(
         self,
@@ -60,6 +52,7 @@ class Trainer:
         checkpoint_path: Path,
         logger,
         logs_dir: Path,
+        figures_dir: Path | None = None,
     ):
         self.model = model.to(device)
         self.config = config
@@ -67,9 +60,17 @@ class Trainer:
         self.checkpoint_path = checkpoint_path
         self.logger = logger
         self.logs_dir = logs_dir
+        self.figures_dir = figures_dir or logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.figures_dir.mkdir(parents=True, exist_ok=True)
 
-        self.criterion = RawRegressionLoss(mode=config.loss_name)
+        self.criterion = RawRegressionLoss(
+            mode=config.loss_name,
+            huber_delta=config.huber_delta,
+            mse_weight=config.loss_mse_weight,
+            mae_weight=config.loss_mae_weight,
+            bias_regularization_weight=config.bias_regularization_weight,
+        )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
@@ -80,6 +81,7 @@ class Trainer:
         )
 
         self.batch_loss_csv = self.logs_dir / "batch_loss_log.csv"
+        self.epoch_metrics_csv = self.logs_dir / "epoch_metrics.csv"
         self.attn_stats_csv = self.logs_dir / "attention_epoch_stats.csv"
         self.attn_dir = self.logs_dir / "attention_maps"
         self.attn_dir.mkdir(parents=True, exist_ok=True)
@@ -91,11 +93,10 @@ class Trainer:
         self.history: List[Dict[str, float]] = []
         self.best_val_total = float("inf")
         self.best_val_rmse = float("inf")
+        self.best_epoch = 0
         self.no_improve_epochs = 0
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
-        """Create dataloader with consistent options."""
-
         return DataLoader(
             dataset,
             batch_size=self.config.batch_size,
@@ -116,18 +117,23 @@ class Trainer:
                 writer.writeheader()
             writer.writerows(rows)
 
-    def _run_epoch(self, loader: DataLoader, epoch: int, train: bool) -> Tuple[Dict[str, float], List[Dict[str, float]], Dict[str, float], np.ndarray | None]:
-        """Run one train/validation epoch and return metrics + diagnostics."""
-
+    def _run_epoch(
+        self,
+        loader: DataLoader,
+        epoch: int,
+        train: bool,
+    ) -> Tuple[Dict[str, float], List[Dict[str, float]], Dict[str, float], np.ndarray | None]:
         mode = "train" if train else "valid"
-        if train:
-            self.model.train()
-        else:
-            self.model.eval()
+        self.model.train(mode=train)
 
-        total_loss = 0.0
-        total_rmse = 0.0
-        total_mae = 0.0
+        totals = {
+            "loss": 0.0,
+            "rmse": 0.0,
+            "mae": 0.0,
+            "mse": 0.0,
+            "bias": 0.0,
+            "bias_penalty": 0.0,
+        }
         batch_rows: List[Dict[str, float]] = []
 
         attn_min_sum = 0.0
@@ -160,9 +166,12 @@ class Trainer:
                 else:
                     grad_norm = float("nan")
 
-                total_loss += float(loss_out.total.item())
-                total_rmse += float(loss_out.rmse.item())
-                total_mae += float(loss_out.mae.item())
+                totals["loss"] += float(loss_out.total.item())
+                totals["rmse"] += float(loss_out.rmse.item())
+                totals["mae"] += float(loss_out.mae.item())
+                totals["mse"] += float(loss_out.mse.item())
+                totals["bias"] += float(loss_out.mean_bias.item())
+                totals["bias_penalty"] += float(loss_out.bias_penalty.item())
 
                 attn = out.get("attn_map")
                 if attn is not None:
@@ -175,12 +184,13 @@ class Trainer:
                     attn_mean_sum += attn_mean
                     attn_std_sum += attn_std
                     attn_batches += 1
-
                     attn_2d = attn.detach().mean(dim=(0, 1)).cpu().numpy().astype(np.float32)
                     attn_map_sum = attn_2d if attn_map_sum is None else (attn_map_sum + attn_2d)
                 else:
                     attn_min = float("nan")
                     attn_max = float("nan")
+                    attn_mean = float("nan")
+                    attn_std = float("nan")
 
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 batch_rows.append(
@@ -191,33 +201,38 @@ class Trainer:
                         "total_loss": float(loss_out.total.item()),
                         "rmse": float(loss_out.rmse.item()),
                         "mae": float(loss_out.mae.item()),
+                        "mse": float(loss_out.mse.item()),
+                        "mean_bias": float(loss_out.mean_bias.item()),
+                        "bias_penalty": float(loss_out.bias_penalty.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
+                        "attn_mean": attn_mean,
+                        "attn_std": attn_std,
                         "grad_norm": grad_norm,
                     }
                 )
 
                 pbar.set_postfix(
                     {
-                        "total": f"{loss_out.total.item():.4f}",
+                        "loss": f"{loss_out.total.item():.4f}",
                         "rmse": f"{loss_out.rmse.item():.4f}",
-                        "mae": f"{loss_out.mae.item():.4f}",
-                        "attn_min": f"{attn_min:.3f}" if np.isfinite(attn_min) else "nan",
-                        "attn_max": f"{attn_max:.3f}" if np.isfinite(attn_max) else "nan",
+                        "bias": f"{loss_out.mean_bias.item():+.4f}",
                     }
                 )
 
         n = max(1, len(loader))
         metrics = {
-            f"{mode}_total": total_loss / n,
-            f"{mode}_rmse": total_rmse / n,
-            f"{mode}_mae": total_mae / n,
+            f"{mode}_total": totals["loss"] / n,
+            f"{mode}_rmse": totals["rmse"] / n,
+            f"{mode}_mae": totals["mae"] / n,
+            f"{mode}_mse": totals["mse"] / n,
+            f"{mode}_mean_bias": totals["bias"] / n,
+            f"{mode}_bias_penalty": totals["bias_penalty"] / n,
         }
 
         attn_stats = {
             "epoch": float(epoch),
-            "phase": 0.0 if train else 1.0,
             "attn_min": attn_min_sum / max(1, attn_batches),
             "attn_max": attn_max_sum / max(1, attn_batches),
             "attn_mean": attn_mean_sum / max(1, attn_batches),
@@ -232,8 +247,6 @@ class Trainer:
         return metrics, batch_rows, attn_stats, attn_avg
 
     def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Collect raw predictions/targets/ids without any post-processing."""
-
         preds: List[np.ndarray] = []
         trues: List[np.ndarray] = []
         ids: List[str] = []
@@ -258,8 +271,6 @@ class Trainer:
         )
 
     def _save_prediction_debug(self, epoch: int, phase: str, loader: DataLoader) -> Dict[str, float]:
-        """Save raw per-sample predictions and plot unsmoothed curves."""
-
         pred, true, ids = self._collect_predictions(loader)
         csv_path = self.pred_dir / f"epoch_{epoch:03d}_{phase}.csv"
         rows = []
@@ -275,14 +286,29 @@ class Trainer:
                     "error": float(y_pred - y_true),
                 }
             )
-        self._append_rows_csv(csv_path, rows)
+        save_csv_rows(csv_path, rows)
 
-        stats = {
-            "pred_mean": float(np.mean(pred)) if len(pred) else float("nan"),
-            "pred_std": float(np.std(pred)) if len(pred) else float("nan"),
-            "true_mean": float(np.mean(true)) if len(true) else float("nan"),
-            "true_std": float(np.std(true)) if len(true) else float("nan"),
-        }
+        if len(pred):
+            regression_stats = compute_regression_metrics(
+                torch.from_numpy(pred.astype(np.float32)),
+                torch.from_numpy(true.astype(np.float32)),
+            )
+        else:
+            regression_stats = {
+                "pred_mean": float("nan"),
+                "pred_std": float("nan"),
+                "true_mean": float("nan"),
+                "true_std": float("nan"),
+                "mean_bias": float("nan"),
+                "r2": float("nan"),
+                "rmse": float("nan"),
+                "mae": float("nan"),
+                "mse": float("nan"),
+                "pred_min": float("nan"),
+                "pred_max": float("nan"),
+                "true_min": float("nan"),
+                "true_max": float("nan"),
+            }
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -300,33 +326,38 @@ class Trainer:
                     self.curve_dir / f"epoch_{epoch:03d}_{phase}_{bearing_id}.png",
                 )
 
-        if len(pred) and stats["pred_std"] < self.config.collapse_std_threshold:
+        if len(pred) and regression_stats["pred_std"] < self.config.collapse_std_threshold:
             self.logger.warning(
                 "Prediction collapse detected for %s epoch %03d: pred_std=%.8f",
                 phase,
                 epoch,
-                stats["pred_std"],
+                regression_stats["pred_std"],
             )
 
         self.logger.info(
-            "%s epoch %03d raw prediction stats | pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f",
+            (
+                "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
+                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f"
+            ),
             phase.title(),
             epoch,
-            stats["pred_mean"],
-            stats["pred_std"],
-            stats["true_mean"],
-            stats["true_std"],
+            regression_stats["rmse"],
+            regression_stats["mae"],
+            regression_stats["mean_bias"],
+            regression_stats["pred_mean"],
+            regression_stats["pred_std"],
+            regression_stats["true_mean"],
+            regression_stats["true_std"],
         )
-        return stats
+        return regression_stats
 
     def _save_checkpoint(self, epoch: int, valid_total: float, valid_rmse: float) -> None:
-        """Persist best checkpoint payload."""
-
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "epoch": epoch,
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict(),
             "best_valid_total": valid_total,
             "best_valid_rmse": valid_rmse,
             "config": self.config.__dict__,
@@ -334,12 +365,11 @@ class Trainer:
         torch.save(payload, self.checkpoint_path)
 
     def fit(self, train_dataset, valid_dataset) -> List[Dict[str, float]]:
-        """Execute training loop with early stopping and return history."""
-
         train_loader = self._make_loader(train_dataset, shuffle=True)
         valid_loader = self._make_loader(valid_dataset, shuffle=False)
 
         for epoch in range(1, self.config.epochs + 1):
+            current_lr = float(self.optimizer.param_groups[0]["lr"])
             tr, tr_rows, tr_attn_stats, tr_attn_avg = self._run_epoch(train_loader, epoch, train=True)
             va, va_rows, va_attn_stats, va_attn_avg = self._run_epoch(valid_loader, epoch, train=False)
 
@@ -347,16 +377,8 @@ class Trainer:
             self._append_rows_csv(
                 self.attn_stats_csv,
                 [
-                    {
-                        "epoch": epoch,
-                        "phase": "train",
-                        **{k: v for k, v in tr_attn_stats.items() if k not in {"epoch", "phase"}},
-                    },
-                    {
-                        "epoch": epoch,
-                        "phase": "valid",
-                        **{k: v for k, v in va_attn_stats.items() if k not in {"epoch", "phase"}},
-                    },
+                    {"epoch": epoch, "phase": "train", **tr_attn_stats},
+                    {"epoch": epoch, "phase": "valid", **va_attn_stats},
                 ],
             )
 
@@ -366,34 +388,39 @@ class Trainer:
                 np.save(self.attn_dir / f"epoch_{epoch:03d}_valid.npy", va_attn_avg)
 
             valid_pred_stats = self._save_prediction_debug(epoch, "valid", valid_loader)
+            self.scheduler.step(va["valid_rmse"])
+            new_lr = float(self.optimizer.param_groups[0]["lr"])
+            lr_changed = abs(new_lr - current_lr) > 1e-12
 
             epoch_row = {
+                "epoch": epoch,
                 **tr,
                 **va,
-                **valid_pred_stats,
-                "epoch": epoch,
-                "lr": self.optimizer.param_groups[0]["lr"],
+                **{f"valid_pred_{k}": v for k, v in valid_pred_stats.items()},
+                "lr": new_lr,
             }
             self.history.append(epoch_row)
+            save_csv_rows(self.epoch_metrics_csv, self.history)
+            save_json(self.logs_dir / "history.json", {"history": self.history})
 
             self.logger.info(
                 (
-                    "Epoch %03d | lr %.6f | train_total %.4f train_rmse %.4f train_mae %.4f | "
-                    "valid_total %.4f valid_rmse %.4f valid_mae %.4f"
+                    "Epoch %03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f"
                 ),
                 epoch,
-                self.optimizer.param_groups[0]["lr"],
-                tr["train_total"],
+                new_lr,
+                " (scheduler step)" if lr_changed else "",
                 tr["train_rmse"],
                 tr["train_mae"],
-                va["valid_total"],
+                tr["train_mean_bias"],
                 va["valid_rmse"],
                 va["valid_mae"],
+                va["valid_mean_bias"],
             )
             self.logger.info(
                 (
-                    "Epoch %03d attention stats | "
-                    "train min/max %.5f/%.5f mean/std %.5f/%.5f | "
+                    "Epoch %03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
                     "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
                 ),
                 epoch,
@@ -407,23 +434,20 @@ class Trainer:
                 va_attn_stats["attn_std"],
             )
 
-            self.scheduler.step(va["valid_rmse"])
-
             improved_total = va["valid_total"] < self.best_val_total
             improved_rmse = va["valid_rmse"] < self.best_val_rmse
-
             if improved_total:
                 self.best_val_total = va["valid_total"]
 
             if improved_rmse:
                 self.best_val_rmse = va["valid_rmse"]
+                self.best_epoch = epoch
                 self.no_improve_epochs = 0
                 self._save_checkpoint(epoch, self.best_val_total, self.best_val_rmse)
                 self.logger.info(
-                    "Saved checkpoint at epoch %03d with valid_rmse=%.4f and valid_total=%.4f",
+                    "Saved new best checkpoint at epoch %03d with valid_rmse=%.4f",
                     epoch,
                     self.best_val_rmse,
-                    va["valid_total"],
                 )
             else:
                 self.no_improve_epochs += 1
@@ -435,8 +459,9 @@ class Trainer:
 
             if self.no_improve_epochs >= self.config.early_stopping_patience:
                 self.logger.info(
-                    "Early stopping triggered at epoch %03d (best valid_rmse=%.4f)",
+                    "Early stopping triggered at epoch %03d (best epoch %03d, best valid_rmse=%.4f)",
                     epoch,
+                    self.best_epoch,
                     self.best_val_rmse,
                 )
                 break
@@ -444,14 +469,10 @@ class Trainer:
         return self.history
 
     def evaluate(self, test_dataset) -> Dict[str, float]:
-        """Evaluate best model checkpoint against test dataset."""
-
         if self.checkpoint_path.exists():
             payload = torch.load(self.checkpoint_path, map_location=self.device)
             self.model.load_state_dict(payload["model_state"])
-            self.logger.info(
-                "Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>")
-            )
+            self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 
         test_loader = self._make_loader(test_dataset, shuffle=False)
         self._save_prediction_debug(0, "test", test_loader)
@@ -460,11 +481,16 @@ class Trainer:
             "rmse": result.rmse,
             "mae": result.mae,
             "phm_score": result.phm_score,
+            "r2": result.r2,
+            "mean_bias": result.mean_bias,
+            "best_epoch": self.best_epoch,
         }
         self.logger.info(
-            "Test metrics | RMSE %.4f | MAE %.4f | PHM Score %.4f",
+            "Test metrics | RMSE %.4f | MAE %.4f | R2 %.4f | Bias %+.4f | PHM Score %.4f",
             result.rmse,
             result.mae,
+            result.r2,
+            result.mean_bias,
             result.phm_score,
         )
         return metrics

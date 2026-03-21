@@ -1,4 +1,4 @@
-"""Hybrid RUL architecture: TCN + Transformer + Degradation-Aware Attention + HI."""
+"""Hybrid RUL architecture: TCN + Transformer + optional temporal attention + HI."""
 
 from __future__ import annotations
 
@@ -26,6 +26,11 @@ class ModelConfig:
     transformer_layers: int = 2
     transformer_ffn_dim: int = 256
     dropout: float = 0.1
+    use_attention: bool = True
+    attention_temperature: float = 1.0
+    attention_recency_strength: float = 0.5
+    head_hidden_dim: int = 32
+    output_activation: str = "identity"
 
 
 class HybridRULModel(nn.Module):
@@ -51,17 +56,27 @@ class HybridRULModel(nn.Module):
             dropout=cfg.dropout,
         )
         self.hi = HealthIndicatorNet(sensor_dim=cfg.sensor_dim)
-        self.degradation_attention = DegradationAwareAttention(
-            embed_dim=cfg.transformer_embed_dim,
-            num_heads=cfg.transformer_heads,
-            dropout=cfg.dropout,
-        )
+        self.use_attention = bool(cfg.use_attention)
+        if self.use_attention:
+            self.degradation_attention = DegradationAwareAttention(
+                embed_dim=cfg.transformer_embed_dim,
+                num_heads=cfg.transformer_heads,
+                dropout=cfg.dropout,
+                temperature=cfg.attention_temperature,
+                recency_strength=cfg.attention_recency_strength,
+            )
+            attention_dim = cfg.transformer_embed_dim
+        else:
+            self.degradation_attention = None
+            attention_dim = cfg.transformer_embed_dim
 
-        fusion_input_dim = (
-            cfg.tcn_channels + cfg.transformer_embed_dim + cfg.transformer_embed_dim + 1
+        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + 1
+        self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
+        self.rul_head = RULHead(
+            input_dim=64,
+            hidden_dim=cfg.head_hidden_dim,
+            activation=cfg.output_activation,
         )
-        self.fusion = FusionMLP(fusion_input_dim)
-        self.rul_head = RULHead()
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         # Stage 1: TCN
@@ -73,8 +88,18 @@ class HybridRULModel(nn.Module):
         # HI module from raw input
         hi_score, hi_stats = self.hi(x)
 
-        # Stage 3: degradation-aware attention
-        da_feat, attn_map = self.degradation_attention(tr_seq, hi_score)
+        # Stage 3: optional degradation-aware attention
+        if self.use_attention and self.degradation_attention is not None:
+            da_feat, attn_map, temporal_attn = self.degradation_attention(tr_seq, hi_score)
+        else:
+            da_feat = tr_pool
+            temporal_attn = torch.full(
+                (tr_seq.size(0), tr_seq.size(1)),
+                1.0 / max(tr_seq.size(1), 1),
+                device=tr_seq.device,
+                dtype=tr_seq.dtype,
+            )
+            attn_map = None
 
         # Stage 4: Feature fusion
         fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
@@ -91,6 +116,7 @@ class HybridRULModel(nn.Module):
             "transformer_pool": tr_pool,
             "degradation_feat": da_feat,
             "attn_map": attn_map,
+            "temporal_attn": temporal_attn,
             "fusion_feat": fused,
         }
 

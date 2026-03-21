@@ -1,67 +1,35 @@
-"""Visualization utilities for PHM2012 RUL project.
-
-This module centralizes plotting logic for training and evaluation artifacts.
-Requested core functions:
-- plot_rul_curve(true_rul, pred_rul, save_path)
-- plot_hi_curve(hi_values, save_path)
-- plot_attention(attention_matrix, save_path)
-
-Implementation details:
-- Uses matplotlib + seaborn for publication-friendly style.
-- Accepts numpy-like arrays and converts safely.
-- Creates output directories automatically.
-"""
+"""Visualization utilities for PHM2012 RUL project."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
+
+try:
+    import seaborn as sns
+except ModuleNotFoundError:  # pragma: no cover - optional plotting dependency
+    sns = None
 
 
-# Use seaborn theme for clearer research plots.
-sns.set_theme(style="whitegrid", context="talk")
+if sns is not None:
+    sns.set_theme(style="whitegrid", context="talk")
+else:
+    plt.style.use("seaborn-v0_8-whitegrid")
 
 
 def _ensure_dir(path: Path) -> None:
-    """Ensure parent directory exists before saving figures.
-
-    Args:
-        path: Output image path.
-    """
-
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _to_numpy_1d(x: np.ndarray | List[float]) -> np.ndarray:
-    """Convert array-like values to flattened numpy vector.
-
-    Args:
-        x: Input values.
-
-    Returns:
-        Float numpy vector of shape ``(N,)``.
-    """
-
+def _to_numpy_1d(x: np.ndarray | Sequence[float]) -> np.ndarray:
     arr = np.asarray(x, dtype=np.float32)
     return arr.reshape(-1)
 
 
 def plot_rul_curve(true_rul: np.ndarray | List[float], pred_rul: np.ndarray | List[float], save_path: str | Path) -> None:
-    """Plot true RUL versus predicted RUL.
-
-    Args:
-        true_rul: Ground-truth RUL sequence.
-        pred_rul: Predicted RUL sequence.
-        save_path: Path to save image.
-
-    Returns:
-        None. Figure is written to disk.
-    """
-
     save_path = Path(save_path)
     _ensure_dir(save_path)
 
@@ -86,16 +54,6 @@ def plot_rul_curve(true_rul: np.ndarray | List[float], pred_rul: np.ndarray | Li
 
 
 def plot_hi_curve(hi_values: np.ndarray | List[float], save_path: str | Path) -> None:
-    """Plot health indicator trajectory over time.
-
-    Args:
-        hi_values: Health-indicator values in chronological order.
-        save_path: Path to save image.
-
-    Returns:
-        None. Figure is written to disk.
-    """
-
     save_path = Path(save_path)
     _ensure_dir(save_path)
 
@@ -113,17 +71,7 @@ def plot_hi_curve(hi_values: np.ndarray | List[float], save_path: str | Path) ->
     plt.close()
 
 
-def plot_attention(attention_matrix: np.ndarray, save_path: str | Path) -> None:
-    """Plot attention heatmap.
-
-    Args:
-        attention_matrix: 2D attention matrix ``(T, T)`` or modality matrix.
-        save_path: Path to save image.
-
-    Returns:
-        None. Figure is written to disk.
-    """
-
+def plot_attention(attention_matrix: np.ndarray, save_path: str | Path, title: str = "Attention Heatmap") -> None:
     save_path = Path(save_path)
     _ensure_dir(save_path)
 
@@ -132,8 +80,12 @@ def plot_attention(attention_matrix: np.ndarray, save_path: str | Path) -> None:
         raise ValueError(f"Expected 2D attention matrix, got shape {attn.shape}")
 
     plt.figure(figsize=(6.5, 5.5))
-    sns.heatmap(attn, cmap="mako", cbar=True)
-    plt.title("Attention Heatmap")
+    if sns is not None:
+        sns.heatmap(attn, cmap="mako", cbar=True)
+    else:
+        plt.imshow(attn, aspect="auto", cmap="viridis")
+        plt.colorbar()
+    plt.title(title)
     plt.xlabel("Key Index")
     plt.ylabel("Query Index")
     plt.tight_layout()
@@ -141,16 +93,130 @@ def plot_attention(attention_matrix: np.ndarray, save_path: str | Path) -> None:
     plt.close()
 
 
+def plot_prediction_scatter(y_true: np.ndarray, y_pred: np.ndarray, save_path: str | Path) -> None:
+    save_path = Path(save_path)
+    _ensure_dir(save_path)
+    y_true = _to_numpy_1d(y_true)
+    y_pred = _to_numpy_1d(y_pred)
+    lo = float(min(y_true.min(initial=0.0), y_pred.min(initial=0.0)))
+    hi = float(max(y_true.max(initial=1.0), y_pred.max(initial=1.0)))
+
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true, y_pred, s=20, alpha=0.6, color="#2563eb", edgecolors="none")
+    plt.plot([lo, hi], [lo, hi], linestyle="--", color="#dc2626", linewidth=1.8, label="Ideal")
+    plt.xlabel("Ground Truth")
+    plt.ylabel("Prediction")
+    plt.title("Prediction vs Ground Truth")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
+def plot_residual_histogram(residuals: np.ndarray, save_path: str | Path) -> None:
+    save_path = Path(save_path)
+    _ensure_dir(save_path)
+    residuals = _to_numpy_1d(residuals)
+
+    plt.figure(figsize=(7, 5))
+    if sns is not None:
+        sns.histplot(residuals, bins=30, kde=True, color="#7c3aed")
+    else:
+        plt.hist(residuals, bins=30, color="#7c3aed", alpha=0.8)
+    plt.axvline(0.0, color="#111827", linestyle="--", linewidth=1.5)
+    plt.xlabel("Residual (Prediction - Ground Truth)")
+    plt.title("Residual Histogram")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
+def plot_residual_vs_target(y_true: np.ndarray, residuals: np.ndarray, save_path: str | Path) -> None:
+    save_path = Path(save_path)
+    _ensure_dir(save_path)
+    y_true = _to_numpy_1d(y_true)
+    residuals = _to_numpy_1d(residuals)
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(y_true, residuals, s=20, alpha=0.6, color="#dc2626", edgecolors="none")
+    plt.axhline(0.0, color="#111827", linestyle="--", linewidth=1.5)
+    plt.xlabel("Ground Truth")
+    plt.ylabel("Residual")
+    plt.title("Residual vs Ground Truth")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
+def plot_prediction_distribution(y_true: np.ndarray, y_pred: np.ndarray, save_path: str | Path) -> None:
+    save_path = Path(save_path)
+    _ensure_dir(save_path)
+    y_true = _to_numpy_1d(y_true)
+    y_pred = _to_numpy_1d(y_pred)
+
+    plt.figure(figsize=(7, 5))
+    if sns is not None:
+        sns.kdeplot(y_true, label="Ground Truth", linewidth=2.2, color="#2563eb")
+        sns.kdeplot(y_pred, label="Prediction", linewidth=2.2, color="#dc2626", linestyle="--")
+    else:
+        plt.hist(y_true, bins=30, density=True, alpha=0.45, color="#2563eb", label="Ground Truth")
+        plt.hist(y_pred, bins=30, density=True, alpha=0.45, color="#dc2626", label="Prediction")
+    plt.xlabel("Normalized RUL")
+    plt.title("Prediction Distribution vs Ground Truth")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
+def plot_attention_weights(weights: np.ndarray, save_path: str | Path, title: str = "Temporal Attention Weights") -> None:
+    save_path = Path(save_path)
+    _ensure_dir(save_path)
+    weights = _to_numpy_1d(weights)
+
+    plt.figure(figsize=(8, 3.5))
+    plt.plot(np.arange(len(weights)), weights, linewidth=2.0, color="#0f766e")
+    plt.xlabel("Time Index")
+    plt.ylabel("Weight")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+
+def plot_training_metrics(history: List[Dict[str, float]], out_path: Path) -> None:
+    _ensure_dir(out_path)
+    epochs = np.arange(1, len(history) + 1)
+    train_rmse = np.asarray([h["train_rmse"] for h in history], dtype=np.float32)
+    valid_rmse = np.asarray([h["valid_rmse"] for h in history], dtype=np.float32)
+    train_mae = np.asarray([h["train_mae"] for h in history], dtype=np.float32)
+    valid_mae = np.asarray([h["valid_mae"] for h in history], dtype=np.float32)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].plot(epochs, train_rmse, label="Train RMSE", linewidth=2)
+    axes[0].plot(epochs, valid_rmse, label="Valid RMSE", linewidth=2)
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("RMSE")
+    axes[0].set_title("RMSE by Epoch")
+    axes[0].legend()
+
+    axes[1].plot(epochs, train_mae, label="Train MAE", linewidth=2)
+    axes[1].plot(epochs, valid_mae, label="Valid MAE", linewidth=2)
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("MAE")
+    axes[1].set_title("MAE by Epoch")
+    axes[1].legend()
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
 # --------------------------
 # Backward-compatible helpers
 # --------------------------
 
 def plot_training_loss(history: List[Dict[str, float]], out_path: Path) -> None:
-    """Plot training and validation losses vs epoch.
-
-    This helper remains for compatibility with existing training scripts.
-    """
-
     _ensure_dir(out_path)
     epochs = np.arange(1, len(history) + 1)
     train_loss = np.asarray([h["train_total"] for h in history], dtype=np.float32)
@@ -169,25 +235,10 @@ def plot_training_loss(history: List[Dict[str, float]], out_path: Path) -> None:
 
 
 def plot_rul_prediction_curve(y_true: np.ndarray, y_pred: np.ndarray, out_path: Path) -> None:
-    """Compatibility alias for old API name.
-
-    Args:
-        y_true: Ground truth RUL.
-        y_pred: Predicted RUL.
-        out_path: Output image path.
-    """
-
     plot_rul_curve(y_true, y_pred, out_path)
 
 
 def plot_health_indicator_curve(hi: np.ndarray, out_path: Path) -> None:
-    """Compatibility alias for old API name.
-
-    Args:
-        hi: Health indicator values.
-        out_path: Output image path.
-    """
-
     plot_hi_curve(hi, out_path)
 
 
@@ -197,15 +248,6 @@ def plot_single_bearing_prediction(
     y_pred: np.ndarray,
     out_path: Path,
 ) -> None:
-    """Plot one bearing's RUL trajectory.
-
-    Args:
-        bearing_id: Bearing identifier string.
-        y_true: Ground truth RUL values.
-        y_pred: Predicted RUL values.
-        out_path: Output image path.
-    """
-
     _ensure_dir(out_path)
     x = np.arange(len(y_true))
 

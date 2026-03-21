@@ -1,20 +1,11 @@
-"""Evaluation entrypoint for saved hybrid PHM2012 RUL model.
-
-This script performs three responsibilities:
-1. Load prepared PHM2012 test windows and checkpoint.
-2. Run inference and compute RMSE/MAE/PHM score.
-3. Automatically generate visualization artifacts:
-   - outputs/rul_curve.png
-   - outputs/hi_curve.png
-   - outputs/attention_heatmap.png
-"""
+"""Evaluation entrypoint for saved hybrid PHM2012 RUL model."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -24,20 +15,33 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.evaluator import evaluate_model, group_predictions_by_id, grouped_regression_metrics
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
 from src.loss import compute_regression_metrics, phm2012_score
 from src.preprocess import prepare_datasets
-from src.utils import configure_logging, ensure_project_paths, get_device, load_yaml, save_json, set_seed
-from src.visualization import plot_attention, plot_hi_curve, plot_rul_curve
+from src.utils import (
+    build_run_name,
+    configure_logging,
+    ensure_project_paths,
+    load_yaml,
+    save_csv_rows,
+    save_json,
+    set_seed,
+)
+from src.visualization import (
+    plot_attention,
+    plot_attention_weights,
+    plot_hi_curve,
+    plot_prediction_distribution,
+    plot_prediction_scatter,
+    plot_residual_histogram,
+    plot_residual_vs_target,
+    plot_rul_curve,
+    plot_single_bearing_prediction,
+)
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments.
-
-    Returns:
-        Parsed argparse namespace.
-    """
-
     parser = argparse.ArgumentParser(description="Evaluate hybrid PHM2012 RUL model")
     parser.add_argument(
         "--config",
@@ -51,21 +55,17 @@ def parse_args() -> argparse.Namespace:
         default=str(ROOT / "outputs" / "checkpoints" / "best_model.pth"),
         help="Checkpoint file.",
     )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["valid", "test"],
+        help="Dataset split used for evaluation.",
+    )
     return parser.parse_args()
 
 
 def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULModel:
-    """Construct model from configuration.
-
-    Args:
-        cfg: Full config dictionary.
-        sensor_dim: Input sensor channel count.
-        device: Torch device.
-
-    Returns:
-        Instantiated model moved to ``device``.
-    """
-
     m = cfg["model"]
     model_cfg = ModelConfig(
         sensor_dim=sensor_dim,
@@ -77,91 +77,36 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         transformer_layers=int(m["transformer_layers"]),
         transformer_ffn_dim=int(m["transformer_ffn_dim"]),
         dropout=float(m["dropout"]),
+        use_attention=bool(m.get("use_attention", True)),
+        attention_temperature=float(m.get("attention_temperature", 1.0)),
+        attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
+        head_hidden_dim=int(m.get("head_hidden_dim", 32)),
+        output_activation=str(m.get("output_activation", "identity")),
     )
     return HybridRULModel(model_cfg).to(device)
 
 
-def _run_inference_with_attention(
-    model: HybridRULModel,
-    loader: DataLoader,
-    device: torch.device,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Run inference and aggregate outputs needed for metrics and plotting.
-
-    Args:
-        model: Loaded hybrid model.
-        loader: Test dataloader.
-        device: Torch device.
-
-    Returns:
-        Tuple ``(y_true, y_pred, hi, attention_avg)`` where
-        - ``y_true`` shape: ``(N,)``
-        - ``y_pred`` shape: ``(N,)``
-        - ``hi`` shape: ``(N,)``
-        - ``attention_avg`` shape: ``(T,T)``
-
-    Notes:
-        - All tensors are moved to CPU numpy arrays before plotting.
-        - Attention map is averaged over batch and heads across all batches.
-    """
-
-    model.eval()
-
-    y_true_chunks: List[np.ndarray] = []
-    y_pred_chunks: List[np.ndarray] = []
-    hi_chunks: List[np.ndarray] = []
-
-    attn_sum: torch.Tensor | None = None
-    attn_count = 0
-
-    with torch.no_grad():
-        for batch in loader:
-            x = batch["x"].to(device)
-            y = batch["y"].to(device)
-
-            out = model(x)
-            pred = out["pred"]
-            hi = out["hi"]
-            attn = out["attn_map"]  # (B, H, T, T)
-
-            y_true_chunks.append(y.detach().cpu().numpy().reshape(-1))
-            y_pred_chunks.append(pred.detach().cpu().numpy().reshape(-1))
-            hi_chunks.append(hi.detach().cpu().numpy().reshape(-1))
-
-            # Average attention over batch and heads for a compact heatmap.
-            attn_mean = attn.mean(dim=(0, 1)).detach().cpu()
-            if attn_sum is None:
-                attn_sum = attn_mean
-            else:
-                attn_sum = attn_sum + attn_mean
-            attn_count += 1
-
-    if not y_true_chunks:
-        raise RuntimeError("No samples produced during evaluation.")
-
-    y_true = np.concatenate(y_true_chunks, axis=0)
-    y_pred = np.concatenate(y_pred_chunks, axis=0)
-    hi_vals = np.concatenate(hi_chunks, axis=0)
-
-    if attn_sum is None or attn_count == 0:
-        attention_avg = np.eye(1, dtype=np.float32)
-    else:
-        attention_avg = (attn_sum / float(attn_count)).numpy().astype(np.float32)
-
-    return y_true, y_pred, hi_vals, attention_avg
+def _attention_average(attention_maps: List[np.ndarray], window_size: int) -> np.ndarray:
+    if not attention_maps:
+        return np.eye(window_size, dtype=np.float32)
+    stacked = np.stack(attention_maps, axis=0).astype(np.float32)
+    return stacked.mean(axis=(0, 1))
 
 
 def main() -> None:
-    """Main entrypoint for evaluation + visualization export."""
-
     args = parse_args()
     cfg = load_yaml(args.config)
-    paths = ensure_project_paths(ROOT)
-    logger = configure_logging(paths["logs"] / "evaluate.log")
 
     seed = int(cfg["experiment"].get("seed", 42))
-    set_seed(seed)
+    run_name = build_run_name(
+        base_name=str(cfg["experiment"].get("name", "rul_experiment")),
+        seed=seed,
+        suffix=str(cfg["experiment"].get("tag", "")) or None,
+    )
+    paths = ensure_project_paths(ROOT, run_name=run_name)
+    logger = configure_logging(paths["run_logs"] / f"evaluate_{args.split}.log")
 
+    set_seed(seed)
     data_cfg = cfg["data"]
     prepared = prepare_datasets(
         dataset_root=data_cfg["dataset_root"],
@@ -174,48 +119,98 @@ def main() -> None:
         max_windows_per_bearing=int(data_cfg.get("max_windows_per_bearing", 20000)),
     )
 
-    logger.info("Dataset summary during evaluation: %s", {
-        "train_samples": len(prepared.train_dataset),
-        "valid_samples": len(prepared.valid_dataset),
-        "test_samples": len(prepared.test_dataset),
-        "num_sensors": prepared.feature_dim,
-        "detected_sensor_columns": prepared.detected_sensor_columns,
-    })
-
-    device = get_device()
+    split_dataset = prepared.test_dataset if args.split == "test" else prepared.valid_dataset
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_model(cfg, sensor_dim=prepared.feature_dim, device=device)
 
     ckpt = Path(args.checkpoint)
+    if not ckpt.exists():
+        fallback = paths.get("run_checkpoints", paths["checkpoints"]) / "best_model.pth"
+        ckpt = fallback
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
     payload = torch.load(ckpt, map_location=device)
     model.load_state_dict(payload["model_state"])
-    logger.info("Loaded checkpoint from epoch %s", payload.get("epoch", "unknown"))
+    logger.info("Loaded checkpoint %s from epoch %s", ckpt, payload.get("epoch", "unknown"))
 
-    loader = DataLoader(
-        prepared.test_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=False,
+    loader = DataLoader(split_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
+    result = evaluate_model(model, loader, device)
+
+    y_true = result.y_true.astype(np.float32)
+    y_pred = result.y_pred.astype(np.float32)
+    residuals = y_pred - y_true
+
+    norm_metrics = compute_regression_metrics(torch.from_numpy(y_pred), torch.from_numpy(y_true))
+    norm_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred), torch.from_numpy(y_true))
+    norm_metrics["num_samples"] = int(len(y_true))
+
+    target_scale = float(prepared.target_scale)
+    y_true_raw = y_true * target_scale
+    y_pred_raw = y_pred * target_scale
+    raw_metrics = compute_regression_metrics(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
+    raw_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
+    raw_metrics["target_scale"] = target_scale
+
+    grouped_rows = grouped_regression_metrics(result.ids, y_true, y_pred)
+    grouped_rows_raw = grouped_regression_metrics(result.ids, y_true_raw, y_pred_raw)
+    for row_norm, row_raw in zip(grouped_rows, grouped_rows_raw):
+        row_norm["rmse_raw"] = row_raw["rmse"]
+        row_norm["mae_raw"] = row_raw["mae"]
+        row_norm["mean_bias_raw"] = row_raw["mean_bias"]
+
+    attention_mean = _attention_average(result.attention_maps, window_size=int(data_cfg.get("window_size", 40)))
+    temporal_attention_examples = result.temporal_attention[: int(cfg.get("evaluation", {}).get("attention_num_samples", 3))]
+
+    eval_dir = paths["run_results"] / f"evaluation_{args.split}"
+    figures_dir = eval_dir / "figures"
+    tables_dir = eval_dir / "tables"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_rul_curve(y_true, y_pred, figures_dir / "prediction_timeseries_normalized.png")
+    plot_rul_curve(y_true_raw, y_pred_raw, figures_dir / "prediction_timeseries_raw.png")
+    plot_prediction_scatter(y_true, y_pred, figures_dir / "prediction_scatter_normalized.png")
+    plot_prediction_scatter(y_true_raw, y_pred_raw, figures_dir / "prediction_scatter_raw.png")
+    plot_residual_histogram(residuals, figures_dir / "residual_histogram_normalized.png")
+    plot_residual_histogram(y_pred_raw - y_true_raw, figures_dir / "residual_histogram_raw.png")
+    plot_residual_vs_target(y_true, residuals, figures_dir / "residual_vs_target_normalized.png")
+    plot_residual_vs_target(y_true_raw, y_pred_raw - y_true_raw, figures_dir / "residual_vs_target_raw.png")
+    plot_prediction_distribution(y_true, y_pred, figures_dir / "prediction_distribution_normalized.png")
+    plot_prediction_distribution(y_true_raw, y_pred_raw, figures_dir / "prediction_distribution_raw.png")
+    plot_hi_curve(result.hi, figures_dir / "health_indicator_curve.png")
+    plot_attention(attention_mean, figures_dir / "attention_heatmap_mean.png")
+
+    for idx, temporal_weights in enumerate(temporal_attention_examples, start=1):
+        plot_attention_weights(
+            np.asarray(temporal_weights, dtype=np.float32),
+            figures_dir / f"temporal_attention_sample_{idx}.png",
+            title=f"Temporal Attention Weights Sample {idx}",
+        )
+
+    grouped = group_predictions_by_id(result.ids, y_true_raw, y_pred_raw, result.hi)
+    for bearing_id, arrays in list(grouped.items())[:3]:
+        plot_single_bearing_prediction(
+            bearing_id,
+            arrays["y_true"],
+            arrays["y_pred"],
+            figures_dir / f"bearing_{bearing_id}_timeseries.png",
+        )
+
+    save_json(
+        tables_dir / "metrics.json",
+        {
+            "split": args.split,
+            "checkpoint": str(ckpt),
+            "normalized": norm_metrics,
+            "raw": raw_metrics,
+        },
     )
+    save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
 
-    y_true, y_pred, hi_vals, attn_avg = _run_inference_with_attention(model, loader, device)
-
-    # Compute metrics in torch for consistency with existing project utilities.
-    y_true_t = torch.from_numpy(y_true)
-    y_pred_t = torch.from_numpy(y_pred)
-    metrics = compute_regression_metrics(y_pred_t, y_true_t)
-    metrics["phm_score"] = phm2012_score(y_pred_t, y_true_t)
-    metrics["num_samples"] = int(len(y_true))
-
-    save_json(paths["logs"] / "evaluation_metrics.json", metrics)
-    logger.info("Evaluation summary: %s", metrics)
-
-    # Required automatic figures.
-    plot_rul_curve(y_true, y_pred, paths["outputs"] / "rul_curve.png")
-    plot_hi_curve(hi_vals, paths["outputs"] / "hi_curve.png")
-    plot_attention(attn_avg, paths["outputs"] / "attention_heatmap.png")
-    logger.info("Saved figures: outputs/rul_curve.png, outputs/hi_curve.png, outputs/attention_heatmap.png")
+    logger.info("Evaluation normalized metrics: %s", norm_metrics)
+    logger.info("Evaluation raw metrics: %s", raw_metrics)
+    logger.info("Saved evaluation artifacts under %s", eval_dir)
 
 
 if __name__ == "__main__":
