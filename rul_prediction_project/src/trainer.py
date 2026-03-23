@@ -477,20 +477,28 @@ class Trainer:
         test_loader = self._make_loader(test_dataset, shuffle=False)
         self._save_prediction_debug(0, "test", test_loader)
         result = evaluate_model(self.model, test_loader, self.device)
+        regression_metrics = compute_regression_metrics(
+            torch.from_numpy(result.y_pred.astype(np.float32)),
+            torch.from_numpy(result.y_true.astype(np.float32)),
+        )
         metrics = {
-            "rmse": result.rmse,
-            "mae": result.mae,
+            "rmse": regression_metrics["rmse"],
+            "mae": regression_metrics["mae"],
+            "r2": regression_metrics["r2"],
+            "mean_bias": regression_metrics["mean_bias"],
+            "pred_std": regression_metrics["pred_std"],
+            "true_std": regression_metrics["true_std"],
+            "pred_true_std_ratio": regression_metrics["pred_std"] / max(regression_metrics["true_std"], 1e-8),
             "phm_score": result.phm_score,
-            "r2": result.r2,
-            "mean_bias": result.mean_bias,
             "best_epoch": self.best_epoch,
         }
-        self.logger.info(
-            "Test metrics | RMSE %.4f | MAE %.4f | R2 %.4f | Bias %+.4f | PHM Score %.4f",
-            result.rmse,
-            result.mae,
-            result.r2,
-            result.mean_bias,
-            result.phm_score,
-        )
+        self.logger.info("TEST RESULTS")
+        self.logger.info("RMSE: %.6f", metrics["rmse"])
+        self.logger.info("MAE: %.6f", metrics["mae"])
+        self.logger.info("R2: %.6f", metrics["r2"])
+        self.logger.info("Mean Bias: %+.6f", metrics["mean_bias"])
+        self.logger.info("Pred Std: %.6f", metrics["pred_std"])
+        self.logger.info("True Std: %.6f", metrics["true_std"])
+        self.logger.info("Pred/True Std Ratio: %.6f", metrics["pred_true_std_ratio"])
+        self.logger.info("PHM Score: %.6f", metrics["phm_score"])
         return metrics

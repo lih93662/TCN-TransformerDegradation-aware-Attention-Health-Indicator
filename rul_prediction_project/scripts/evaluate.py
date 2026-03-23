@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import torch
 from torch.utils.data import DataLoader
 
@@ -46,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(ROOT / "configs" / "config.yaml"),
+        default=str(ROOT / "configs" / "config_loss.yaml"),
         help="Path to YAML config.",
     )
     parser.add_argument(
@@ -144,6 +146,7 @@ def main() -> None:
     norm_metrics = compute_regression_metrics(torch.from_numpy(y_pred), torch.from_numpy(y_true))
     norm_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred), torch.from_numpy(y_true))
     norm_metrics["num_samples"] = int(len(y_true))
+    norm_metrics["pred_true_std_ratio"] = norm_metrics["pred_std"] / max(norm_metrics["true_std"], 1e-8)
 
     target_scale = float(prepared.target_scale)
     y_true_raw = y_true * target_scale
@@ -151,6 +154,7 @@ def main() -> None:
     raw_metrics = compute_regression_metrics(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
     raw_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
     raw_metrics["target_scale"] = target_scale
+    raw_metrics["pred_true_std_ratio"] = raw_metrics["pred_std"] / max(raw_metrics["true_std"], 1e-8)
 
     grouped_rows = grouped_regression_metrics(result.ids, y_true, y_pred)
     grouped_rows_raw = grouped_regression_metrics(result.ids, y_true_raw, y_pred_raw)
@@ -208,6 +212,14 @@ def main() -> None:
     )
     save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
 
+    logger.info("TEST RESULTS (%s, normalized scale)", args.split.upper())
+    logger.info("RMSE: %.6f", norm_metrics["rmse"])
+    logger.info("MAE: %.6f", norm_metrics["mae"])
+    logger.info("R2: %.6f", norm_metrics["r2"])
+    logger.info("Mean Bias: %+.6f", norm_metrics["mean_bias"])
+    logger.info("Pred Std: %.6f", norm_metrics["pred_std"])
+    logger.info("True Std: %.6f", norm_metrics["true_std"])
+    logger.info("Pred/True Std Ratio: %.6f", norm_metrics["pred_true_std_ratio"])
     logger.info("Evaluation normalized metrics: %s", norm_metrics)
     logger.info("Evaluation raw metrics: %s", raw_metrics)
     logger.info("Saved evaluation artifacts under %s", eval_dir)

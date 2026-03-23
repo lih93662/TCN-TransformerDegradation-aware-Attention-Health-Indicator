@@ -1,17 +1,20 @@
 """Training entrypoint for PHM2012 RUL prediction project.
 
 Usage:
-    python scripts/train.py --config configs/config.yaml
-    python scripts/train.py --config configs/config.yaml --seeds 42 43 44
+    python scripts/train.py --config configs/config_loss.yaml
+    python scripts/train.py --config configs/config_loss.yaml --seeds 42 43 44
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, List
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -38,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        default=str(ROOT / "configs" / "config.yaml"),
+        default=str(ROOT / "configs" / "config_loss.yaml"),
         help="Path to YAML config file.",
     )
     parser.add_argument(
@@ -103,6 +106,7 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
 
     set_seed(seed)
     logger.info("Run name: %s", run_name)
+    logger.info("Reproducibility seed: %d", seed)
     logger.info("Preparing datasets from PHM2012 files...")
     data_cfg = cfg["data"]
     prepared = prepare_datasets(
