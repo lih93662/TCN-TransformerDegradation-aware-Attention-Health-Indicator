@@ -28,7 +28,7 @@ class TrainerConfig:
     batch_size: int = 64
     epochs: int = 50
     num_workers: int = 0
-    early_stopping_patience: int = 20
+    early_stopping_patience: int = 5
     grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3

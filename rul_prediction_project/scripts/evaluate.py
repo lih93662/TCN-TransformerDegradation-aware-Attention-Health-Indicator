@@ -101,6 +101,11 @@ def _attention_average(attention_maps: List[np.ndarray], window_size: int) -> np
     stacked = np.stack(attention_maps, axis=0).astype(np.float32)
     return stacked.mean(axis=(0, 1))
 
+def _figure_path(figures_dir: Path, filename: str) -> Path:
+    path = figures_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 def main() -> None:
     args = parse_args()
@@ -181,23 +186,23 @@ def main() -> None:
     figures_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
 
-    plot_rul_curve(y_true, y_pred, figures_dir / "prediction_timeseries_normalized.png")
-    plot_rul_curve(y_true_raw, y_pred_raw, figures_dir / "prediction_timeseries_raw.png")
-    plot_prediction_scatter(y_true, y_pred, figures_dir / "prediction_scatter_normalized.png")
-    plot_prediction_scatter(y_true_raw, y_pred_raw, figures_dir / "prediction_scatter_raw.png")
-    plot_residual_histogram(residuals, figures_dir / "residual_histogram_normalized.png")
-    plot_residual_histogram(y_pred_raw - y_true_raw, figures_dir / "residual_histogram_raw.png")
-    plot_residual_vs_target(y_true, residuals, figures_dir / "residual_vs_target_normalized.png")
-    plot_residual_vs_target(y_true_raw, y_pred_raw - y_true_raw, figures_dir / "residual_vs_target_raw.png")
-    plot_prediction_distribution(y_true, y_pred, figures_dir / "prediction_distribution_normalized.png")
-    plot_prediction_distribution(y_true_raw, y_pred_raw, figures_dir / "prediction_distribution_raw.png")
-    plot_hi_curve(result.hi, figures_dir / "health_indicator_curve.png")
-    plot_attention(attention_mean, figures_dir / "attention_heatmap_mean.png")
+    plot_rul_curve(y_true, y_pred, _figure_path(figures_dir, "prediction_timeseries_normalized.png"))
+    plot_rul_curve(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_timeseries_raw.png"))
+    plot_prediction_scatter(y_true, y_pred, _figure_path(figures_dir, "prediction_scatter_normalized.png"))
+    plot_prediction_scatter(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_scatter_raw.png"))
+    plot_residual_histogram(residuals, _figure_path(figures_dir, "residual_histogram_normalized.png"))
+    plot_residual_histogram(y_pred_raw - y_true_raw, _figure_path(figures_dir, "residual_histogram_raw.png"))
+    plot_residual_vs_target(y_true, residuals, _figure_path(figures_dir, "residual_vs_target_normalized.png"))
+    plot_residual_vs_target(y_true_raw, y_pred_raw - y_true_raw, _figure_path(figures_dir, "residual_vs_target_raw.png"))
+    plot_prediction_distribution(y_true, y_pred, _figure_path(figures_dir, "prediction_distribution_normalized.png"))
+    plot_prediction_distribution(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_distribution_raw.png"))
+    plot_hi_curve(result.hi, _figure_path(figures_dir, "health_indicator_curve.png"))
+    plot_attention(attention_mean, _figure_path(figures_dir, "attention_heatmap_mean.png"))
 
     for idx, temporal_weights in enumerate(temporal_attention_examples, start=1):
         plot_attention_weights(
             np.asarray(temporal_weights, dtype=np.float32),
-            figures_dir / f"temporal_attention_sample_{idx}.png",
+            _figure_path(figures_dir, f"temporal_attention_sample_{idx}.png"),
             title=f"Temporal Attention Weights Sample {idx}",
         )
 
@@ -207,7 +212,7 @@ def main() -> None:
             bearing_id,
             arrays["y_true"],
             arrays["y_pred"],
-            figures_dir / f"bearing_{bearing_id}_timeseries.png",
+            _figure_path(figures_dir, f"bearing_{bearing_id}_timeseries.png"),
         )
 
     save_json(
