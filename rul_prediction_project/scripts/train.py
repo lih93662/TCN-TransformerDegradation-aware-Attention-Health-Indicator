@@ -36,6 +36,14 @@ from src.utils import (
 from src.visualization import plot_training_loss, plot_training_metrics
 
 
+VARIANT_LABELS = {
+    "ablation_backbone": "A",
+    "ablation_attention": "B",
+    "ablation_loss": "C",
+    "ablation_full": "D",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train hybrid PHM2012 RUL model")
     parser.add_argument(
@@ -105,7 +113,9 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
     logger = configure_logging(project_paths["run_logs"] / "train.log")
 
     set_seed(seed)
+    variant_tag = str(exp_cfg.get("tag", ""))
     logger.info("Run name: %s", run_name)
+    logger.info("Experiment variant: %s (%s)", VARIANT_LABELS.get(variant_tag, "main"), variant_tag or "default")
     logger.info("Reproducibility seed: %d", seed)
     logger.info("Preparing datasets from PHM2012 files...")
     data_cfg = cfg["data"]

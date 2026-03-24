@@ -143,7 +143,7 @@ class Trainer:
         attn_batches = 0
         attn_map_sum: np.ndarray | None = None
 
-        pbar = tqdm(loader, desc=f"{mode.title()} Epoch {epoch:03d}", leave=False)
+        pbar = tqdm(loader, desc=f"{mode.title()} Epoch {epoch:03d}/{self.config.epochs:03d}", leave=False)
         grad_context = torch.enable_grad() if train else torch.no_grad()
 
         with grad_context:
@@ -405,10 +405,11 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f | "
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f | "
                     "valid rmse %.4f mae %.4f bias %+.4f"
                 ),
                 epoch,
+                self.config.epochs,
                 new_lr,
                 " (scheduler step)" if lr_changed else "",
                 tr["train_rmse"],
@@ -420,10 +421,11 @@ class Trainer:
             )
             self.logger.info(
                 (
-                    "Epoch %03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
+                    "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
                     "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
                 ),
                 epoch,
+                self.config.epochs,
                 tr_attn_stats["attn_min"],
                 tr_attn_stats["attn_max"],
                 tr_attn_stats["attn_mean"],

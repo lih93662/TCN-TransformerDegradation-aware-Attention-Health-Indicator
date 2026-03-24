@@ -25,10 +25,10 @@ def _load_project_utils():
 
 
 EXPERIMENTS = [
-    ("A_backbone", Path("configs/config_backbone.yaml")),
-    ("B_attention", Path("configs/config_attention.yaml")),
-    ("C_loss", Path("configs/config_loss.yaml")),
-    ("D_full", Path("configs/config_full.yaml")),
+    ("A", "backbone", Path("configs/config_backbone.yaml")),
+    ("B", "attention", Path("configs/config_attention.yaml")),
+    ("C", "main_loss", Path("configs/config_loss.yaml")),
+    ("D", "full", Path("configs/config_full.yaml")),
 ]
 
 
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run 4 ablation experiments sequentially")
     parser.add_argument("--python", type=str, default=sys.executable, help="Python executable to use")
     parser.add_argument("--dry-run", action="store_true", help="Only print planned commands")
+    parser.add_argument("--collect-only", action="store_true", help="Only collect existing A/B/C/D test metrics into the ablation table")
     return parser.parse_args()
 
 
@@ -93,7 +94,7 @@ def _read_best_valid_metrics(epoch_csv: Path) -> Dict[str, float]:
     }
 
 
-def collect_summary(label: str, config_path: Path) -> Dict[str, object]:
+def collect_summary(variant: str, variant_name: str, config_path: Path) -> Dict[str, object]:
     _, _, load_yaml, _ = _load_project_utils()
     cfg = load_yaml(config_path)
     run_dir = run_dir_from_config(config_path)
@@ -103,9 +104,10 @@ def collect_summary(label: str, config_path: Path) -> Dict[str, object]:
     checkpoint = run_dir / "checkpoints" / "best_model.pth"
 
     row: Dict[str, object] = {
-        "experiment": label,
+        "variant": variant,
+        "variant_name": variant_name,
         "config": str(config_path),
-        "attention": bool(cfg.get("model", {}).get("use_attention", True)),
+        "attention_on": bool(cfg.get("model", {}).get("use_attention", True)),
         "loss_name": str(cfg.get("train", {}).get("loss_name", "mse")),
         "bias_regularization_weight": float(cfg.get("train", {}).get("bias_regularization_weight", 0.0)),
         "output_dir": str(run_dir),
@@ -118,34 +120,64 @@ def collect_summary(label: str, config_path: Path) -> Dict[str, object]:
     return row
 
 
+def _formalize_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    formal_rows: List[Dict[str, object]] = []
+    for row in rows:
+        formal_rows.append(
+            {
+                "variant": row.get("variant"),
+                "variant_name": row.get("variant_name"),
+                "attention_on": row.get("attention_on"),
+                "loss_name": row.get("loss_name"),
+                "bias_regularization_weight": row.get("bias_regularization_weight"),
+                "rmse": row.get("rmse"),
+                "mae": row.get("mae"),
+                "r2": row.get("r2"),
+                "mean_bias": row.get("mean_bias"),
+                "pred_std": row.get("pred_std"),
+                "true_std": row.get("true_std"),
+                "pred_true_std_ratio": row.get("pred_true_std_ratio"),
+                "best_epoch": row.get("best_epoch"),
+                "best_checkpoint": row.get("best_checkpoint"),
+                "output_dir": row.get("output_dir"),
+            }
+        )
+    return formal_rows
+
+
 def main() -> None:
     args = parse_args()
     rows: List[Dict[str, object]] = []
 
-    for label, rel_cfg in EXPERIMENTS:
+    for variant, variant_name, rel_cfg in EXPERIMENTS:
         cfg_path = ROOT / rel_cfg
         cmd = [args.python, str(ROOT / "scripts" / "train.py"), "--config", str(cfg_path)]
-        print(f"\n[{label}] {' '.join(cmd)}")
+        print(f"\n[{variant}] {' '.join(cmd)}")
         if args.dry_run:
+            continue
+        if args.collect_only:
+            rows.append(collect_summary(variant, variant_name, cfg_path))
             continue
 
         completed = subprocess.run(cmd, cwd=ROOT)
         if completed.returncode != 0:
-            raise SystemExit(f"Experiment {label} failed with exit code {completed.returncode}")
-        rows.append(collect_summary(label, cfg_path))
+            raise SystemExit(f"Experiment {variant} failed with exit code {completed.returncode}")
+        rows.append(collect_summary(variant, variant_name, cfg_path))
 
     if rows:
         _, ensure_project_paths, _, save_csv_rows = _load_project_utils()
         shared_paths = ensure_project_paths(ROOT)
         save_csv_rows(shared_paths["results"] / "ablation_summary.csv", rows)
-        md_path = shared_paths["results"] / "ablation_summary.md"
-        headers = list(rows[0].keys())
+        formal_rows = _formalize_rows(rows)
+        save_csv_rows(shared_paths["results"] / "ablation_table.csv", formal_rows)
+        md_path = shared_paths["results"] / "ablation_table.md"
+        headers = list(formal_rows[0].keys())
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("| " + " | ".join(headers) + " |\n")
             f.write("| " + " | ".join(["---"] * len(headers)) + " |\n")
-            for row in rows:
+            for row in formal_rows:
                 f.write("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n")
-        print(f"\nSaved summary: {shared_paths['results'] / 'ablation_summary.csv'}")
+        print(f"\nSaved ablation table: {shared_paths['results'] / 'ablation_table.csv'}")
 
 
 if __name__ == "__main__":

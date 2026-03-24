@@ -30,6 +30,13 @@ from src.utils import (
     save_json,
     set_seed,
 )
+VARIANT_LABELS = {
+    "ablation_backbone": "A",
+    "ablation_attention": "B",
+    "ablation_loss": "C",
+    "ablation_full": "D",
+}
+
 from src.visualization import (
     plot_attention,
     plot_attention_weights,
@@ -107,6 +114,8 @@ def main() -> None:
     )
     paths = ensure_project_paths(ROOT, run_name=run_name)
     logger = configure_logging(paths["run_logs"] / f"evaluate_{args.split}.log")
+    variant_tag = str(cfg["experiment"].get("tag", ""))
+    logger.info("Evaluation variant: %s (%s)", VARIANT_LABELS.get(variant_tag, "main"), variant_tag or "default")
 
     set_seed(seed)
     data_cfg = cfg["data"]
