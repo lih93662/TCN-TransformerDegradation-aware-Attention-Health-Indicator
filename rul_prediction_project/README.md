@@ -94,6 +94,25 @@ Outputs:
 - `outputs/results/benchmark_results.csv`
 - `outputs/benchmark_results.png`
 
+## Ablation Study
+
+Legacy A/B/C/D ablations are preserved, and an extended publication-ready matrix
+is available for optimization, HI pathway, attention internals, and backbone
+comparisons.
+
+See full matrix and commands:
+
+- `docs/ablation_study.md`
+
+Quick start:
+
+```bash
+python scripts/run_ablation.py --list
+python scripts/run_ablation.py --suite legacy
+python scripts/run_ablation.py --suite optimization
+python scripts/run_ablation.py --suite all --dry-run
+```
+
 ## Online Prediction
 
 Single file:

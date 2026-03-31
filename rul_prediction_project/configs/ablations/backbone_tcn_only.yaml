@@ -1,0 +1,8 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: ablation_backbone_tcn_only
+
+model:
+  backbone_variant: "tcn_only"
+  use_attention: false

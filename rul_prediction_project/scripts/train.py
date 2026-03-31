@@ -74,7 +74,12 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         transformer_layers=int(model_cfg_raw["transformer_layers"]),
         transformer_ffn_dim=int(model_cfg_raw["transformer_ffn_dim"]),
         dropout=float(model_cfg_raw["dropout"]),
+        backbone_variant=str(model_cfg_raw.get("backbone_variant", "tcn_transformer")),
+        use_hi=bool(model_cfg_raw.get("use_hi", True)),
         use_attention=bool(model_cfg_raw.get("use_attention", True)),
+        attention_use_hi_bias=bool(model_cfg_raw.get("attention_use_hi_bias", True)),
+        attention_use_temporal_gate=bool(model_cfg_raw.get("attention_use_temporal_gate", True)),
+        attention_use_recency_bias=bool(model_cfg_raw.get("attention_use_recency_bias", True)),
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
@@ -84,6 +89,20 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
 
 def build_trainer_config(cfg: Dict) -> TrainerConfig:
     train_cfg_raw = cfg["train"]
+    use_mae_term = train_cfg_raw.get("use_mae_term")
+    use_bias_regularization = train_cfg_raw.get("use_bias_regularization")
+    mae_weight = float(train_cfg_raw.get("loss_mae_weight", 0.3))
+    bias_weight = float(train_cfg_raw.get("bias_regularization_weight", 0.0))
+    loss_name = str(train_cfg_raw.get("loss_name", "mse"))
+    if use_mae_term is not None:
+        use_mae_term = bool(use_mae_term)
+        loss_name = "mse_mae" if use_mae_term else "mse"
+        if not use_mae_term:
+            mae_weight = 0.0
+    if use_bias_regularization is not None:
+        use_bias_regularization = bool(use_bias_regularization)
+        if not use_bias_regularization:
+            bias_weight = 0.0
     return TrainerConfig(
         lr=float(train_cfg_raw["lr"]),
         batch_size=int(train_cfg_raw["batch_size"]),
@@ -94,11 +113,11 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         scheduler_factor=float(train_cfg_raw.get("scheduler_factor", 0.5)),
         scheduler_patience=int(train_cfg_raw.get("scheduler_patience", 3)),
         weight_decay=float(train_cfg_raw.get("weight_decay", 0.0)),
-        loss_name=str(train_cfg_raw.get("loss_name", "mse")),
+        loss_name=loss_name,
         loss_mse_weight=float(train_cfg_raw.get("loss_mse_weight", 1.0)),
-        loss_mae_weight=float(train_cfg_raw.get("loss_mae_weight", 0.3)),
+        loss_mae_weight=mae_weight,
         huber_delta=float(train_cfg_raw.get("huber_delta", 0.1)),
-        bias_regularization_weight=float(train_cfg_raw.get("bias_regularization_weight", 0.0)),
+        bias_regularization_weight=bias_weight,
     )
 
 
@@ -160,6 +179,7 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
 
     save_json(project_paths["run_logs"] / "history.json", {"history": history})
     save_json(project_paths["run_logs"] / "dataset_summary.json", stats)
+    save_json(project_paths["run_logs"] / "resolved_config.json", cfg)
     save_json(project_paths["run_results"] / "test_metrics.json", metrics)
     save_json(
         project_paths["run_results"] / "run_metadata.json",

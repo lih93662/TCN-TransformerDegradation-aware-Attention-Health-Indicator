@@ -24,6 +24,9 @@ class DegradationAwareAttention(nn.Module):
         dropout: float = 0.1,
         temperature: float = 1.0,
         recency_strength: float = 0.5,
+        use_hi_bias: bool = True,
+        use_temporal_gate: bool = True,
+        use_recency_bias: bool = True,
     ):
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -34,6 +37,9 @@ class DegradationAwareAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(self.head_dim)
         self.temperature = max(float(temperature), 1e-4)
         self.recency_strength = float(recency_strength)
+        self.use_hi_bias = bool(use_hi_bias)
+        self.use_temporal_gate = bool(use_temporal_gate)
+        self.use_recency_bias = bool(use_recency_bias)
 
         self.input_norm = nn.LayerNorm(embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
@@ -67,13 +73,13 @@ class DegradationAwareAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        hi_score: torch.Tensor,
+        hi_score: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass.
 
         Args:
             x: Sequence feature (B, T, C).
-            hi_score: Scalar HI in [0, 1], shape (B, 1).
+            hi_score: Optional scalar HI in [0, 1], shape (B, 1).
 
         Returns:
             weighted_vector: (B, C)
@@ -93,8 +99,14 @@ class DegradationAwareAttention(nn.Module):
         key_life = life.view(1, 1, 1, t)
         temporal_life = life.view(1, t)
 
-        head_bias = self.hi_to_head_bias(hi_score).view(b, self.num_heads, 1, 1)
-        degradation_bias = self.recency_strength * head_bias * key_life
+        if self.use_hi_bias and hi_score is not None:
+            head_bias = self.hi_to_head_bias(hi_score).view(b, self.num_heads, 1, 1)
+        else:
+            head_bias = torch.zeros((b, self.num_heads, 1, 1), dtype=x.dtype, device=x.device)
+        if self.use_recency_bias:
+            degradation_bias = self.recency_strength * head_bias * key_life
+        else:
+            degradation_bias = torch.zeros_like(logits)
 
         scores = (logits + degradation_bias) / self.temperature
         attn = torch.softmax(scores, dim=-1)
@@ -104,8 +116,21 @@ class DegradationAwareAttention(nn.Module):
         context = self.out_proj(self._combine_heads(context))
 
         temporal_logits = self.temporal_score(context).squeeze(-1)
-        temporal_logits = temporal_logits + self.recency_strength * self.hi_to_temporal_gate(hi_score) * temporal_life
-        temporal_weights = torch.softmax(temporal_logits / self.temperature, dim=-1)
+        if self.use_temporal_gate:
+            if hi_score is not None:
+                gate = self.hi_to_temporal_gate(hi_score)
+            else:
+                gate = torch.zeros((b, 1), dtype=x.dtype, device=x.device)
+            if self.use_recency_bias:
+                temporal_logits = temporal_logits + self.recency_strength * gate * temporal_life
+            temporal_weights = torch.softmax(temporal_logits / self.temperature, dim=-1)
+        else:
+            temporal_weights = torch.full(
+                (b, t),
+                1.0 / max(t, 1),
+                dtype=x.dtype,
+                device=x.device,
+            )
         temporal_weights = self.dropout(temporal_weights)
 
         weighted_vector = torch.sum(context * temporal_weights.unsqueeze(-1), dim=1)

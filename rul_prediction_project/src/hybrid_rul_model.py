@@ -26,7 +26,12 @@ class ModelConfig:
     transformer_layers: int = 2
     transformer_ffn_dim: int = 256
     dropout: float = 0.1
+    backbone_variant: str = "tcn_transformer"
+    use_hi: bool = True
     use_attention: bool = True
+    attention_use_hi_bias: bool = True
+    attention_use_temporal_gate: bool = True
+    attention_use_recency_bias: bool = True
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
@@ -39,6 +44,9 @@ class HybridRULModel(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
+        self.backbone_variant = str(cfg.backbone_variant).lower()
+        if self.backbone_variant not in {"tcn_transformer", "tcn_only", "transformer_only"}:
+            raise ValueError(f"Unsupported backbone_variant: {cfg.backbone_variant}")
 
         self.tcn = TCNEncoder(
             input_dim=cfg.sensor_dim,
@@ -47,15 +55,17 @@ class HybridRULModel(nn.Module):
             dilations=cfg.tcn_dilations,
             dropout=cfg.dropout,
         )
+        tr_input_dim = cfg.tcn_channels if self.backbone_variant != "transformer_only" else cfg.sensor_dim
         self.transformer = TransformerTemporalEncoder(
-            input_dim=cfg.tcn_channels,
+            input_dim=tr_input_dim,
             embedding_dim=cfg.transformer_embed_dim,
             heads=cfg.transformer_heads,
             layers=cfg.transformer_layers,
             ffn_dim=cfg.transformer_ffn_dim,
             dropout=cfg.dropout,
         )
-        self.hi = HealthIndicatorNet(sensor_dim=cfg.sensor_dim)
+        self.use_hi = bool(cfg.use_hi)
+        self.hi = HealthIndicatorNet(sensor_dim=cfg.sensor_dim) if self.use_hi else None
         self.use_attention = bool(cfg.use_attention)
         if self.use_attention:
             self.degradation_attention = DegradationAwareAttention(
@@ -64,6 +74,9 @@ class HybridRULModel(nn.Module):
                 dropout=cfg.dropout,
                 temperature=cfg.attention_temperature,
                 recency_strength=cfg.attention_recency_strength,
+                use_hi_bias=cfg.attention_use_hi_bias,
+                use_temporal_gate=cfg.attention_use_temporal_gate,
+                use_recency_bias=cfg.attention_use_recency_bias,
             )
             attention_dim = cfg.transformer_embed_dim
         else:
@@ -79,18 +92,41 @@ class HybridRULModel(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        # Stage 1: TCN
-        tcn_seq, tcn_pool = self.tcn(x)
-
-        # Stage 2: Transformer
-        tr_seq, tr_pool = self.transformer(tcn_seq)
+        # Stage 1/2 backbone variants
+        if self.backbone_variant == "tcn_only":
+            tcn_seq, tcn_pool = self.tcn(x)
+            tr_seq = torch.zeros(
+                (x.size(0), tcn_seq.size(1), self.cfg.transformer_embed_dim),
+                device=x.device,
+                dtype=x.dtype,
+            )
+            tr_pool = torch.zeros(
+                (x.size(0), self.cfg.transformer_embed_dim),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        elif self.backbone_variant == "transformer_only":
+            tr_seq, tr_pool = self.transformer(x)
+            tcn_pool = torch.zeros(
+                (x.size(0), self.cfg.tcn_channels),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        else:
+            tcn_seq, tcn_pool = self.tcn(x)
+            tr_seq, tr_pool = self.transformer(tcn_seq)
 
         # HI module from raw input
-        hi_score, hi_stats = self.hi(x)
+        if self.use_hi and self.hi is not None:
+            hi_score, hi_stats = self.hi(x)
+        else:
+            hi_score = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
+            hi_stats = torch.zeros((x.size(0), x.size(-1) * 4), device=x.device, dtype=x.dtype)
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
-            da_feat, attn_map, temporal_attn = self.degradation_attention(tr_seq, hi_score)
+            attn_hi = hi_score if self.cfg.attention_use_hi_bias else None
+            da_feat, attn_map, temporal_attn = self.degradation_attention(tr_seq, attn_hi)
         else:
             da_feat = tr_pool
             temporal_attn = torch.full(
