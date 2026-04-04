@@ -8,4 +8,5 @@ model:
 
 train:
   loss_name: "mse_mae"
+  use_mae_term: true
   bias_regularization_weight: 0.05

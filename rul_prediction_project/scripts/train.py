@@ -109,6 +109,8 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         epochs=int(train_cfg_raw["epochs"]),
         num_workers=int(train_cfg_raw.get("num_workers", 0)),
         early_stopping_patience=int(train_cfg_raw.get("early_stopping_patience", 5)),
+        early_stopping_min_epochs=int(train_cfg_raw.get("early_stopping_min_epochs", 10)),
+        early_stopping_min_delta=float(train_cfg_raw.get("early_stopping_min_delta", 0.0)),
         grad_clip_norm=float(train_cfg_raw.get("grad_clip_norm", 0.0)),
         scheduler_factor=float(train_cfg_raw.get("scheduler_factor", 0.5)),
         scheduler_patience=int(train_cfg_raw.get("scheduler_patience", 3)),
@@ -118,6 +120,7 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         loss_mae_weight=mae_weight,
         huber_delta=float(train_cfg_raw.get("huber_delta", 0.1)),
         bias_regularization_weight=bias_weight,
+        std_regularization_weight=float(train_cfg_raw.get("std_regularization_weight", 0.0)),
     )
 
 

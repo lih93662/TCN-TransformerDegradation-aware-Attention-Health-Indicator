@@ -29,6 +29,8 @@ class TrainerConfig:
     epochs: int = 50
     num_workers: int = 0
     early_stopping_patience: int = 5
+    early_stopping_min_epochs: int = 10
+    early_stopping_min_delta: float = 0.0
     grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
@@ -38,6 +40,7 @@ class TrainerConfig:
     loss_mae_weight: float = 0.3
     huber_delta: float = 0.1
     bias_regularization_weight: float = 0.0
+    std_regularization_weight: float = 0.0
     collapse_std_threshold: float = 1e-4
 
 
@@ -70,6 +73,7 @@ class Trainer:
             mse_weight=config.loss_mse_weight,
             mae_weight=config.loss_mae_weight,
             bias_regularization_weight=config.bias_regularization_weight,
+            std_regularization_weight=config.std_regularization_weight,
         )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
@@ -133,6 +137,7 @@ class Trainer:
             "mse": 0.0,
             "bias": 0.0,
             "bias_penalty": 0.0,
+            "std_penalty": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -142,6 +147,11 @@ class Trainer:
         attn_std_sum = 0.0
         attn_batches = 0
         attn_map_sum: np.ndarray | None = None
+        hi_mean_sum = 0.0
+        hi_std_sum = 0.0
+        hi_min_sum = 0.0
+        hi_max_sum = 0.0
+        hi_batches = 0
 
         pbar = tqdm(loader, desc=f"{mode.title()} Epoch {epoch:03d}/{self.config.epochs:03d}", leave=False)
         grad_context = torch.enable_grad() if train else torch.no_grad()
@@ -172,6 +182,15 @@ class Trainer:
                 totals["mse"] += float(loss_out.mse.item())
                 totals["bias"] += float(loss_out.mean_bias.item())
                 totals["bias_penalty"] += float(loss_out.bias_penalty.item())
+                totals["std_penalty"] += float(loss_out.std_penalty.item())
+
+                hi = out.get("hi")
+                if hi is not None:
+                    hi_mean_sum += float(hi.mean().item())
+                    hi_std_sum += float(hi.std().item())
+                    hi_min_sum += float(hi.min().item())
+                    hi_max_sum += float(hi.max().item())
+                    hi_batches += 1
 
                 attn = out.get("attn_map")
                 if attn is not None:
@@ -204,6 +223,7 @@ class Trainer:
                         "mse": float(loss_out.mse.item()),
                         "mean_bias": float(loss_out.mean_bias.item()),
                         "bias_penalty": float(loss_out.bias_penalty.item()),
+                        "std_penalty": float(loss_out.std_penalty.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -229,6 +249,11 @@ class Trainer:
             f"{mode}_mse": totals["mse"] / n,
             f"{mode}_mean_bias": totals["bias"] / n,
             f"{mode}_bias_penalty": totals["bias_penalty"] / n,
+            f"{mode}_std_penalty": totals["std_penalty"] / n,
+            f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
+            f"{mode}_hi_std": hi_std_sum / max(1, hi_batches),
+            f"{mode}_hi_min": hi_min_sum / max(1, hi_batches),
+            f"{mode}_hi_max": hi_max_sum / max(1, hi_batches),
         }
 
         attn_stats = {
@@ -405,8 +430,8 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f | "
-                    "valid rmse %.4f mae %.4f bias %+.4f"
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -415,9 +440,23 @@ class Trainer:
                 tr["train_rmse"],
                 tr["train_mae"],
                 tr["train_mean_bias"],
+                tr["train_std_penalty"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
+                va["valid_std_penalty"],
+            )
+            self.logger.info(
+                "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",
+                epoch,
+                tr["train_hi_mean"],
+                tr["train_hi_std"],
+                tr["train_hi_min"],
+                tr["train_hi_max"],
+                va["valid_hi_mean"],
+                va["valid_hi_std"],
+                va["valid_hi_min"],
+                va["valid_hi_max"],
             )
             self.logger.info(
                 (
@@ -437,7 +476,8 @@ class Trainer:
             )
 
             improved_total = va["valid_total"] < self.best_val_total
-            improved_rmse = va["valid_rmse"] < self.best_val_rmse
+            min_delta = max(0.0, float(self.config.early_stopping_min_delta))
+            improved_rmse = va["valid_rmse"] < (self.best_val_rmse - min_delta)
             if improved_total:
                 self.best_val_total = va["valid_total"]
 
@@ -458,6 +498,9 @@ class Trainer:
                     self.no_improve_epochs,
                     self.config.early_stopping_patience,
                 )
+
+            if epoch < int(self.config.early_stopping_min_epochs):
+                continue
 
             if self.no_improve_epochs >= self.config.early_stopping_patience:
                 self.logger.info(

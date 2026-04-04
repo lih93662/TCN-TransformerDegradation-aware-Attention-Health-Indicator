@@ -86,7 +86,12 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         transformer_layers=int(m["transformer_layers"]),
         transformer_ffn_dim=int(m["transformer_ffn_dim"]),
         dropout=float(m["dropout"]),
+        backbone_variant=str(m.get("backbone_variant", "tcn_transformer")),
+        use_hi=bool(m.get("use_hi", True)),
         use_attention=bool(m.get("use_attention", True)),
+        attention_use_hi_bias=bool(m.get("attention_use_hi_bias", True)),
+        attention_use_temporal_gate=bool(m.get("attention_use_temporal_gate", True)),
+        attention_use_recency_bias=bool(m.get("attention_use_recency_bias", True)),
         attention_temperature=float(m.get("attention_temperature", 1.0)),
         attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),
@@ -207,6 +212,27 @@ def main() -> None:
         )
 
     grouped = group_predictions_by_id(result.ids, y_true_raw, y_pred_raw, result.hi)
+    hi_summary = {
+        "hi_mean": float(np.mean(result.hi)),
+        "hi_std": float(np.std(result.hi)),
+        "hi_min": float(np.min(result.hi)),
+        "hi_max": float(np.max(result.hi)),
+    }
+    corr = np.corrcoef(y_true, result.hi)[0, 1] if len(y_true) > 1 else np.nan
+    hi_summary["corr_hi_true_rul"] = float(corr) if np.isfinite(corr) else float("nan")
+
+    scatter_rows = []
+    for i, (bid, yt, yp, hi) in enumerate(zip(result.ids, y_true_raw, y_pred_raw, result.hi)):
+        scatter_rows.append(
+            {
+                "sample_index": i,
+                "group": bid,
+                "true_rul_raw": float(yt),
+                "pred_rul_raw": float(yp),
+                "error_raw": float(yp - yt),
+                "health_indicator": float(hi),
+            }
+        )
     for bearing_id, arrays in list(grouped.items())[:3]:
         plot_single_bearing_prediction(
             bearing_id,
@@ -225,6 +251,8 @@ def main() -> None:
         },
     )
     save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
+    save_csv_rows(tables_dir / "prediction_scatter_raw.csv", scatter_rows)
+    save_json(tables_dir / "hi_summary.json", hi_summary)
 
     logger.info("TEST RESULTS (%s, normalized scale)", args.split.upper())
     logger.info("RMSE: %.6f", norm_metrics["rmse"])
@@ -236,6 +264,7 @@ def main() -> None:
     logger.info("Pred/True Std Ratio: %.6f", norm_metrics["pred_true_std_ratio"])
     logger.info("Evaluation normalized metrics: %s", norm_metrics)
     logger.info("Evaluation raw metrics: %s", raw_metrics)
+    logger.info("HI summary: %s", hi_summary)
     logger.info("Saved evaluation artifacts under %s", eval_dir)
 
 
