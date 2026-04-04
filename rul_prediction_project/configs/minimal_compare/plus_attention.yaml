@@ -1,0 +1,12 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: minimal_plus_attention
+
+model:
+  use_hi: false
+  use_attention: true
+  attention_use_hi_bias: false
+
+train:
+  hi_supervision_weight: 0.0

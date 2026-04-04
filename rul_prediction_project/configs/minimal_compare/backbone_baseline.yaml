@@ -1,0 +1,11 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: minimal_backbone_baseline
+
+model:
+  use_hi: false
+  use_attention: false
+
+train:
+  hi_supervision_weight: 0.0

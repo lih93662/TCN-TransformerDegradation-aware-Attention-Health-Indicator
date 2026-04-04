@@ -121,6 +121,8 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         huber_delta=float(train_cfg_raw.get("huber_delta", 0.1)),
         bias_regularization_weight=bias_weight,
         std_regularization_weight=float(train_cfg_raw.get("std_regularization_weight", 0.0)),
+        correlation_regularization_weight=float(train_cfg_raw.get("correlation_regularization_weight", 0.0)),
+        hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.0)),
     )
 
 

@@ -52,7 +52,9 @@ train:
   loss_mae_weight: 0.2
   huber_delta: 0.1
   bias_regularization_weight: 0.0
-  std_regularization_weight: 0.02
+  std_regularization_weight: 0.05
+  correlation_regularization_weight: 0.05
+  hi_supervision_weight: 0.10
 
 evaluation:
   attention_num_samples: 3

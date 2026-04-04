@@ -41,6 +41,8 @@ class TrainerConfig:
     huber_delta: float = 0.1
     bias_regularization_weight: float = 0.0
     std_regularization_weight: float = 0.0
+    correlation_regularization_weight: float = 0.0
+    hi_supervision_weight: float = 0.0
     collapse_std_threshold: float = 1e-4
 
 
@@ -74,6 +76,7 @@ class Trainer:
             mae_weight=config.loss_mae_weight,
             bias_regularization_weight=config.bias_regularization_weight,
             std_regularization_weight=config.std_regularization_weight,
+            correlation_regularization_weight=config.correlation_regularization_weight,
         )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = ReduceLROnPlateau(
@@ -138,6 +141,8 @@ class Trainer:
             "bias": 0.0,
             "bias_penalty": 0.0,
             "std_penalty": 0.0,
+            "corr_penalty": 0.0,
+            "hi_supervision": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -166,9 +171,13 @@ class Trainer:
 
                 out = self.model(x)
                 loss_out = self.criterion(out["pred"], y)
+                hi_sup = torch.tensor(0.0, device=self.device)
+                if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
+                    hi_sup = torch.nn.functional.mse_loss(out["hi"], y)
+                total_loss = loss_out.total + self.config.hi_supervision_weight * hi_sup
 
                 if train:
-                    loss_out.total.backward()
+                    total_loss.backward()
                     grad_norm = float("nan")
                     if self.config.grad_clip_norm and self.config.grad_clip_norm > 0:
                         grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm).item())
@@ -176,13 +185,15 @@ class Trainer:
                 else:
                     grad_norm = float("nan")
 
-                totals["loss"] += float(loss_out.total.item())
+                totals["loss"] += float(total_loss.item())
                 totals["rmse"] += float(loss_out.rmse.item())
                 totals["mae"] += float(loss_out.mae.item())
                 totals["mse"] += float(loss_out.mse.item())
                 totals["bias"] += float(loss_out.mean_bias.item())
                 totals["bias_penalty"] += float(loss_out.bias_penalty.item())
                 totals["std_penalty"] += float(loss_out.std_penalty.item())
+                totals["corr_penalty"] += float(loss_out.corr_penalty.item())
+                totals["hi_supervision"] += float(hi_sup.item())
 
                 hi = out.get("hi")
                 if hi is not None:
@@ -217,13 +228,15 @@ class Trainer:
                         "epoch": epoch,
                         "phase": mode,
                         "batch": batch_idx,
-                        "total_loss": float(loss_out.total.item()),
+                        "total_loss": float(total_loss.item()),
                         "rmse": float(loss_out.rmse.item()),
                         "mae": float(loss_out.mae.item()),
                         "mse": float(loss_out.mse.item()),
                         "mean_bias": float(loss_out.mean_bias.item()),
                         "bias_penalty": float(loss_out.bias_penalty.item()),
                         "std_penalty": float(loss_out.std_penalty.item()),
+                        "corr_penalty": float(loss_out.corr_penalty.item()),
+                        "hi_supervision_loss": float(hi_sup.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -235,7 +248,7 @@ class Trainer:
 
                 pbar.set_postfix(
                     {
-                        "loss": f"{loss_out.total.item():.4f}",
+                        "loss": f"{total_loss.item():.4f}",
                         "rmse": f"{loss_out.rmse.item():.4f}",
                         "bias": f"{loss_out.mean_bias.item():+.4f}",
                     }
@@ -250,6 +263,8 @@ class Trainer:
             f"{mode}_mean_bias": totals["bias"] / n,
             f"{mode}_bias_penalty": totals["bias_penalty"] / n,
             f"{mode}_std_penalty": totals["std_penalty"] / n,
+            f"{mode}_corr_penalty": totals["corr_penalty"] / n,
+            f"{mode}_hi_supervision": totals["hi_supervision"] / n,
             f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
             f"{mode}_hi_std": hi_std_sum / max(1, hi_batches),
             f"{mode}_hi_min": hi_min_sum / max(1, hi_batches),
@@ -430,8 +445,8 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f | "
-                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f"
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr_pen %.6f hi_sup %.6f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr_pen %.6f hi_sup %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -441,10 +456,14 @@ class Trainer:
                 tr["train_mae"],
                 tr["train_mean_bias"],
                 tr["train_std_penalty"],
+                tr["train_corr_penalty"],
+                tr["train_hi_supervision"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
                 va["valid_std_penalty"],
+                va["valid_corr_penalty"],
+                va["valid_hi_supervision"],
             )
             self.logger.info(
                 "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",

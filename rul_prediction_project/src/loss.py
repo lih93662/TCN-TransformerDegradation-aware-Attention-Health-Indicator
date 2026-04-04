@@ -43,6 +43,7 @@ class LossOutput:
     mean_bias: torch.Tensor
     bias_penalty: torch.Tensor
     std_penalty: torch.Tensor
+    corr_penalty: torch.Tensor
 
 
 class RawRegressionLoss(nn.Module):
@@ -56,6 +57,7 @@ class RawRegressionLoss(nn.Module):
         mae_weight: float = 0.0,
         bias_regularization_weight: float = 0.0,
         std_regularization_weight: float = 0.0,
+        correlation_regularization_weight: float = 0.0,
     ):
         super().__init__()
         mode = str(mode).lower()
@@ -66,6 +68,7 @@ class RawRegressionLoss(nn.Module):
         self.mae_weight = float(mae_weight)
         self.bias_regularization_weight = float(bias_regularization_weight)
         self.std_regularization_weight = float(std_regularization_weight)
+        self.correlation_regularization_weight = float(correlation_regularization_weight)
         self.mse = nn.MSELoss()
         self.mae = nn.L1Loss()
         self.huber = nn.HuberLoss(delta=float(huber_delta))
@@ -80,6 +83,13 @@ class RawRegressionLoss(nn.Module):
         pred_std = torch.std(pred.view(-1), unbiased=False)
         target_std = torch.std(target.view(-1), unbiased=False)
         std_penalty = (pred_std - target_std).pow(2)
+        pred_centered = pred.view(-1) - torch.mean(pred.view(-1))
+        target_centered = target.view(-1) - torch.mean(target.view(-1))
+        corr_denom = torch.sqrt(
+            torch.sum(pred_centered.pow(2)) * torch.sum(target_centered.pow(2)) + 1e-8
+        )
+        corr = torch.sum(pred_centered * target_centered) / corr_denom
+        corr_penalty = 1.0 - corr
 
         if self.mode == "mse":
             total = mse
@@ -94,6 +104,8 @@ class RawRegressionLoss(nn.Module):
             total = total + self.bias_regularization_weight * bias_penalty
         if self.std_regularization_weight > 0:
             total = total + self.std_regularization_weight * std_penalty
+        if self.correlation_regularization_weight > 0:
+            total = total + self.correlation_regularization_weight * corr_penalty
 
         return LossOutput(
             total=total,
@@ -103,6 +115,7 @@ class RawRegressionLoss(nn.Module):
             mean_bias=mean_bias,
             bias_penalty=bias_penalty,
             std_penalty=std_penalty,
+            corr_penalty=corr_penalty,
         )
 
 
@@ -153,7 +166,7 @@ def phm2012_score(pred: torch.Tensor, target: torch.Tensor, exp_clip: float = 80
     Lower is better.
     """
 
-    d = (pred.view(-1) - target.view(-1)).detach()
+    d = (pred.view(-1) - target.view(-1)).detach().to(torch.float64)
     clip_v = float(exp_clip)
     neg = torch.exp(torch.clamp(-d / 13.0, max=clip_v)) - 1.0
     pos = torch.exp(torch.clamp(d / 10.0, max=clip_v)) - 1.0
