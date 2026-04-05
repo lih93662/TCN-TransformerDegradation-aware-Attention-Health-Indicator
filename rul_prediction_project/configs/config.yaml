@@ -54,7 +54,10 @@ train:
   bias_regularization_weight: 0.0
   std_regularization_weight: 0.05
   correlation_regularization_weight: 0.05
-  hi_supervision_weight: 0.10
+  hi_supervision_weight: 0.03
+  hi_rank_weight: 0.03
+  hi_variance_weight: 0.10
+  hi_variance_floor: 0.03
 
 evaluation:
   attention_num_samples: 3

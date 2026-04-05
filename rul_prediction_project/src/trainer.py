@@ -43,6 +43,9 @@ class TrainerConfig:
     std_regularization_weight: float = 0.0
     correlation_regularization_weight: float = 0.0
     hi_supervision_weight: float = 0.0
+    hi_rank_weight: float = 0.0
+    hi_variance_weight: float = 0.0
+    hi_variance_floor: float = 0.03
     collapse_std_threshold: float = 1e-4
 
 
@@ -142,7 +145,10 @@ class Trainer:
             "bias_penalty": 0.0,
             "std_penalty": 0.0,
             "corr_penalty": 0.0,
+            "corr_value": 0.0,
             "hi_supervision": 0.0,
+            "hi_rank": 0.0,
+            "hi_var_penalty": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -172,9 +178,26 @@ class Trainer:
                 out = self.model(x)
                 loss_out = self.criterion(out["pred"], y)
                 hi_sup = torch.tensor(0.0, device=self.device)
+                hi_rank = torch.tensor(0.0, device=self.device)
+                hi_var_pen = torch.tensor(0.0, device=self.device)
                 if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], y)
-                total_loss = loss_out.total + self.config.hi_supervision_weight * hi_sup
+                if self.config.hi_rank_weight > 0 and out.get("hi") is not None:
+                    y_flat = y.view(-1)
+                    hi_flat = out["hi"].view(-1)
+                    pair_idx = torch.randperm(y_flat.numel(), device=self.device)
+                    margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
+                    hi_rank = torch.nn.functional.softplus(-margin).mean()
+                if self.config.hi_variance_weight > 0 and out.get("hi") is not None:
+                    hi_std = torch.std(out["hi"].view(-1), unbiased=False)
+                    hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+
+                total_loss = (
+                    loss_out.total
+                    + self.config.hi_supervision_weight * hi_sup
+                    + self.config.hi_rank_weight * hi_rank
+                    + self.config.hi_variance_weight * hi_var_pen
+                )
 
                 if train:
                     total_loss.backward()
@@ -193,7 +216,10 @@ class Trainer:
                 totals["bias_penalty"] += float(loss_out.bias_penalty.item())
                 totals["std_penalty"] += float(loss_out.std_penalty.item())
                 totals["corr_penalty"] += float(loss_out.corr_penalty.item())
+                totals["corr_value"] += float(loss_out.corr_value.item())
                 totals["hi_supervision"] += float(hi_sup.item())
+                totals["hi_rank"] += float(hi_rank.item())
+                totals["hi_var_penalty"] += float(hi_var_pen.item())
 
                 hi = out.get("hi")
                 if hi is not None:
@@ -236,7 +262,10 @@ class Trainer:
                         "bias_penalty": float(loss_out.bias_penalty.item()),
                         "std_penalty": float(loss_out.std_penalty.item()),
                         "corr_penalty": float(loss_out.corr_penalty.item()),
+                        "corr_value": float(loss_out.corr_value.item()),
                         "hi_supervision_loss": float(hi_sup.item()),
+                        "hi_rank_loss": float(hi_rank.item()),
+                        "hi_variance_penalty": float(hi_var_pen.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -264,7 +293,10 @@ class Trainer:
             f"{mode}_bias_penalty": totals["bias_penalty"] / n,
             f"{mode}_std_penalty": totals["std_penalty"] / n,
             f"{mode}_corr_penalty": totals["corr_penalty"] / n,
+            f"{mode}_corr_value": totals["corr_value"] / n,
             f"{mode}_hi_supervision": totals["hi_supervision"] / n,
+            f"{mode}_hi_rank": totals["hi_rank"] / n,
+            f"{mode}_hi_var_penalty": totals["hi_var_penalty"] / n,
             f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
             f"{mode}_hi_std": hi_std_sum / max(1, hi_batches),
             f"{mode}_hi_min": hi_min_sum / max(1, hi_batches),
@@ -286,9 +318,10 @@ class Trainer:
 
         return metrics, batch_rows, attn_stats, attn_avg
 
-    def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
         preds: List[np.ndarray] = []
         trues: List[np.ndarray] = []
+        his: List[np.ndarray] = []
         ids: List[str] = []
 
         self.model.eval()
@@ -299,22 +332,29 @@ class Trainer:
                 out = self.model(x)
                 preds.append(out["pred"].detach().cpu().numpy().reshape(-1))
                 trues.append(y.detach().cpu().numpy().reshape(-1))
+                his.append(out["hi"].detach().cpu().numpy().reshape(-1))
                 ids.extend(list(batch["id"]))
 
         if not preds:
-            return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32), []
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                [],
+            )
 
         return (
             np.concatenate(preds).astype(np.float32),
             np.concatenate(trues).astype(np.float32),
+            np.concatenate(his).astype(np.float32),
             ids,
         )
 
     def _save_prediction_debug(self, epoch: int, phase: str, loader: DataLoader) -> Dict[str, float]:
-        pred, true, ids = self._collect_predictions(loader)
+        pred, true, hi, ids = self._collect_predictions(loader)
         csv_path = self.pred_dir / f"epoch_{epoch:03d}_{phase}.csv"
         rows = []
-        for idx, (bearing_id, y_true, y_pred) in enumerate(zip(ids, true, pred)):
+        for idx, (bearing_id, y_true, y_pred, hi_i) in enumerate(zip(ids, true, pred, hi)):
             rows.append(
                 {
                     "epoch": epoch,
@@ -324,6 +364,7 @@ class Trainer:
                     "true_rul": float(y_true),
                     "pred_rul": float(y_pred),
                     "error": float(y_pred - y_true),
+                    "hi": float(hi_i),
                 }
             )
         save_csv_rows(csv_path, rows)
@@ -349,6 +390,12 @@ class Trainer:
                 "true_min": float("nan"),
                 "true_max": float("nan"),
             }
+        hi_true_corr = float(np.corrcoef(hi, true)[0, 1]) if len(hi) > 1 else float("nan")
+        hi_pred_corr = float(np.corrcoef(hi, pred)[0, 1]) if len(hi) > 1 else float("nan")
+        regression_stats["hi_mean"] = float(np.mean(hi)) if len(hi) else float("nan")
+        regression_stats["hi_std"] = float(np.std(hi)) if len(hi) else float("nan")
+        regression_stats["hi_true_corr"] = hi_true_corr if np.isfinite(hi_true_corr) else float("nan")
+        regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -377,7 +424,7 @@ class Trainer:
         self.logger.info(
             (
                 "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
-                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f"
+                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | hi-true corr %.4f"
             ),
             phase.title(),
             epoch,
@@ -388,6 +435,9 @@ class Trainer:
             regression_stats["pred_std"],
             regression_stats["true_mean"],
             regression_stats["true_std"],
+            regression_stats["hi_mean"],
+            regression_stats["hi_std"],
+            regression_stats["hi_true_corr"],
         )
         return regression_stats
 
@@ -445,8 +495,8 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr_pen %.6f hi_sup %.6f | "
-                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr_pen %.6f hi_sup %.6f"
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f hi_sup %.6f hi_rank %.6f hi_var %.6f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f hi_sup %.6f hi_rank %.6f hi_var %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -456,14 +506,18 @@ class Trainer:
                 tr["train_mae"],
                 tr["train_mean_bias"],
                 tr["train_std_penalty"],
-                tr["train_corr_penalty"],
+                tr["train_corr_value"],
                 tr["train_hi_supervision"],
+                tr["train_hi_rank"],
+                tr["train_hi_var_penalty"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
                 va["valid_std_penalty"],
-                va["valid_corr_penalty"],
+                va["valid_corr_value"],
                 va["valid_hi_supervision"],
+                va["valid_hi_rank"],
+                va["valid_hi_var_penalty"],
             )
             self.logger.info(
                 "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",

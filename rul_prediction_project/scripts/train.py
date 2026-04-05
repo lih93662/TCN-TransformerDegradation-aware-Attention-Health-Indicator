@@ -123,6 +123,9 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         std_regularization_weight=float(train_cfg_raw.get("std_regularization_weight", 0.0)),
         correlation_regularization_weight=float(train_cfg_raw.get("correlation_regularization_weight", 0.0)),
         hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.0)),
+        hi_rank_weight=float(train_cfg_raw.get("hi_rank_weight", 0.0)),
+        hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.0)),
+        hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.03)),
     )
 
 

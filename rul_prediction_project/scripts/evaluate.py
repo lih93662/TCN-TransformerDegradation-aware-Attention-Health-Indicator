@@ -219,7 +219,9 @@ def main() -> None:
         "hi_max": float(np.max(result.hi)),
     }
     corr = np.corrcoef(y_true, result.hi)[0, 1] if len(y_true) > 1 else np.nan
+    corr_pred = np.corrcoef(y_pred, result.hi)[0, 1] if len(y_pred) > 1 else np.nan
     hi_summary["corr_hi_true_rul"] = float(corr) if np.isfinite(corr) else float("nan")
+    hi_summary["corr_hi_pred_rul"] = float(corr_pred) if np.isfinite(corr_pred) else float("nan")
 
     scatter_rows = []
     for i, (bid, yt, yp, hi) in enumerate(zip(result.ids, y_true_raw, y_pred_raw, result.hi)):

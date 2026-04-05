@@ -9,3 +9,5 @@ model:
 
 train:
   hi_supervision_weight: 0.10
+  hi_rank_weight: 0.03
+  hi_variance_weight: 0.10

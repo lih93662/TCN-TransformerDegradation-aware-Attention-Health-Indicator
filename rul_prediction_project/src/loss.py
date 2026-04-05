@@ -44,6 +44,7 @@ class LossOutput:
     bias_penalty: torch.Tensor
     std_penalty: torch.Tensor
     corr_penalty: torch.Tensor
+    corr_value: torch.Tensor
 
 
 class RawRegressionLoss(nn.Module):
@@ -116,6 +117,7 @@ class RawRegressionLoss(nn.Module):
             bias_penalty=bias_penalty,
             std_penalty=std_penalty,
             corr_penalty=corr_penalty,
+            corr_value=corr,
         )
 
 
