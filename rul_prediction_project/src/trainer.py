@@ -424,7 +424,8 @@ class Trainer:
         self.logger.info(
             (
                 "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
-                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | hi-true corr %.4f"
+                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | "
+                "hi-true corr %.4f | hi-pred corr %.4f"
             ),
             phase.title(),
             epoch,
@@ -438,6 +439,7 @@ class Trainer:
             regression_stats["hi_mean"],
             regression_stats["hi_std"],
             regression_stats["hi_true_corr"],
+            regression_stats["hi_pred_corr"],
         )
         return regression_stats
 

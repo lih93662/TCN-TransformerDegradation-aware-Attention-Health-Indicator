@@ -28,6 +28,7 @@ class ModelConfig:
     dropout: float = 0.1
     backbone_variant: str = "tcn_transformer"
     use_hi: bool = True
+    hi_input_source: str = "tcn"
     use_attention: bool = True
     attention_use_hi_bias: bool = True
     attention_use_temporal_gate: bool = True
@@ -65,7 +66,16 @@ class HybridRULModel(nn.Module):
             dropout=cfg.dropout,
         )
         self.use_hi = bool(cfg.use_hi)
-        self.hi = HealthIndicatorNet(sensor_dim=cfg.sensor_dim) if self.use_hi else None
+        self.hi = (
+            HealthIndicatorNet(
+                sensor_dim=cfg.sensor_dim,
+                tcn_channels=cfg.tcn_channels,
+                hi_input_source=cfg.hi_input_source,
+            )
+            if self.use_hi
+            else None
+        )
+        self.hi_feature_dim = self.hi.feature_dim if self.hi is not None else (cfg.sensor_dim * 4)
         self.use_attention = bool(cfg.use_attention)
         if self.use_attention:
             self.degradation_attention = DegradationAwareAttention(
@@ -107,6 +117,7 @@ class HybridRULModel(nn.Module):
             )
         elif self.backbone_variant == "transformer_only":
             tr_seq, tr_pool = self.transformer(x)
+            tcn_seq = None
             tcn_pool = torch.zeros(
                 (x.size(0), self.cfg.tcn_channels),
                 device=x.device,
@@ -118,10 +129,10 @@ class HybridRULModel(nn.Module):
 
         # HI module from raw input
         if self.use_hi and self.hi is not None:
-            hi_score, hi_stats = self.hi(x)
+            hi_score, hi_stats = self.hi(x, tcn_seq=tcn_seq)
         else:
             hi_score = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
-            hi_stats = torch.zeros((x.size(0), x.size(-1) * 4), device=x.device, dtype=x.dtype)
+            hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:

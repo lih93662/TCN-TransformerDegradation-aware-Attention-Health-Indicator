@@ -24,6 +24,7 @@ model:
   transformer_ffn_dim: 256
   dropout: 0.3
   use_hi: true
+  hi_input_source: "tcn"  # stats | tcn | hybrid
   use_attention: true
   attention_use_hi_bias: true
   attention_use_temporal_gate: true
