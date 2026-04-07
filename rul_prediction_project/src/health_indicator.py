@@ -81,6 +81,7 @@ class HealthIndicatorNet(nn.Module):
             nn.Linear(16, 1),
         )
         self.temporal_head = nn.Linear(tcn_channels, 1)
+        self.temporal_blend_weight = 0.3
 
     def _extract_tcn_temporal_feat(self, tcn_seq: torch.Tensor | None, fallback_x: torch.Tensor) -> torch.Tensor:
         if tcn_seq is None:
@@ -94,16 +95,16 @@ class HealthIndicatorNet(nn.Module):
         last_feat = tcn_seq[:, -1, :]
         return torch.cat([mean_feat, std_feat, last_feat], dim=-1)
 
-    def _estimate_hi_sequence(self, tcn_seq: torch.Tensor | None) -> torch.Tensor | None:
+    def _estimate_hi_sequence(self, tcn_seq: torch.Tensor | None) -> Tuple[torch.Tensor | None, torch.Tensor | None]:
         if tcn_seq is None:
-            return None
+            return None, None
         hi_seq_logit = self.temporal_head(tcn_seq)
-        return torch.sigmoid(hi_seq_logit)
+        return torch.sigmoid(hi_seq_logit), hi_seq_logit
 
     def forward(
         self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Return HI scalar, raw HI input features, and optional temporal HI sequence."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Return HI scalar, HI input features, temporal HI sequence, and temporal logits."""
 
         stat_feat = self.extractor(x)
         temporal_feat = self._extract_tcn_temporal_feat(tcn_seq, fallback_x=x)
@@ -117,8 +118,11 @@ class HealthIndicatorNet(nn.Module):
 
         hi_feat_norm = self.norm(hi_feat)
         hi_logit = self.mlp(hi_feat_norm)
+        hi_temporal, hi_temporal_logit = self._estimate_hi_sequence(tcn_seq)
+        if hi_temporal_logit is not None:
+            end_logit = hi_temporal_logit[:, -1, :]
+            hi_logit = (1.0 - self.temporal_blend_weight) * hi_logit + self.temporal_blend_weight * end_logit
         hi_score = torch.sigmoid(hi_logit)
-        hi_temporal = self._estimate_hi_sequence(tcn_seq)
 
         # Keep deterministic [0,1] output per window (no batch-wise normalization).
-        return hi_score, hi_feat, hi_temporal
+        return hi_score, hi_feat, hi_temporal, hi_temporal_logit

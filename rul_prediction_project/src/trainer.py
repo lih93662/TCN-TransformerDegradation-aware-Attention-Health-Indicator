@@ -46,7 +46,7 @@ class TrainerConfig:
     hi_rank_weight: float = 0.0
     hi_variance_weight: float = 0.0
     hi_variance_floor: float = 0.03
-    hi_smoothness_weight: float = 0.002
+    hi_smoothness_weight: float = 0.01
     collapse_std_threshold: float = 1e-4
 
 
@@ -195,8 +195,10 @@ class Trainer:
                     hi_std = torch.std(out["hi"].view(-1), unbiased=False)
                     hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
+                hi_temporal_logit = out.get("hi_temporal_logit")
                 if self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
-                    hi_delta = hi_temporal[:, 1:, :] - hi_temporal[:, :-1, :]
+                    smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
+                    hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
                     hi_smoothness = hi_delta.pow(2).mean()
 
                 total_loss = (
