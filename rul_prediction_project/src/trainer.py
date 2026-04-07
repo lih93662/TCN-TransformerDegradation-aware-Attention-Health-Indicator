@@ -46,6 +46,7 @@ class TrainerConfig:
     hi_rank_weight: float = 0.0
     hi_variance_weight: float = 0.0
     hi_variance_floor: float = 0.03
+    hi_smoothness_weight: float = 0.002
     collapse_std_threshold: float = 1e-4
 
 
@@ -149,6 +150,7 @@ class Trainer:
             "hi_supervision": 0.0,
             "hi_rank": 0.0,
             "hi_var_penalty": 0.0,
+            "hi_smoothness": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -180,6 +182,7 @@ class Trainer:
                 hi_sup = torch.tensor(0.0, device=self.device)
                 hi_rank = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
+                hi_smoothness = torch.tensor(0.0, device=self.device)
                 if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], y)
                 if self.config.hi_rank_weight > 0 and out.get("hi") is not None:
@@ -191,12 +194,17 @@ class Trainer:
                 if self.config.hi_variance_weight > 0 and out.get("hi") is not None:
                     hi_std = torch.std(out["hi"].view(-1), unbiased=False)
                     hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+                hi_temporal = out.get("hi_temporal")
+                if self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
+                    hi_delta = hi_temporal[:, 1:, :] - hi_temporal[:, :-1, :]
+                    hi_smoothness = hi_delta.pow(2).mean()
 
                 total_loss = (
                     loss_out.total
                     + self.config.hi_supervision_weight * hi_sup
                     + self.config.hi_rank_weight * hi_rank
                     + self.config.hi_variance_weight * hi_var_pen
+                    + self.config.hi_smoothness_weight * hi_smoothness
                 )
 
                 if train:
@@ -220,6 +228,7 @@ class Trainer:
                 totals["hi_supervision"] += float(hi_sup.item())
                 totals["hi_rank"] += float(hi_rank.item())
                 totals["hi_var_penalty"] += float(hi_var_pen.item())
+                totals["hi_smoothness"] += float(hi_smoothness.item())
 
                 hi = out.get("hi")
                 if hi is not None:
@@ -266,6 +275,7 @@ class Trainer:
                         "hi_supervision_loss": float(hi_sup.item()),
                         "hi_rank_loss": float(hi_rank.item()),
                         "hi_variance_penalty": float(hi_var_pen.item()),
+                        "hi_smoothness_loss": float(hi_smoothness.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -297,6 +307,7 @@ class Trainer:
             f"{mode}_hi_supervision": totals["hi_supervision"] / n,
             f"{mode}_hi_rank": totals["hi_rank"] / n,
             f"{mode}_hi_var_penalty": totals["hi_var_penalty"] / n,
+            f"{mode}_hi_smoothness": totals["hi_smoothness"] / n,
             f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
             f"{mode}_hi_std": hi_std_sum / max(1, hi_batches),
             f"{mode}_hi_min": hi_min_sum / max(1, hi_batches),
@@ -497,8 +508,10 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f hi_sup %.6f hi_rank %.6f hi_var %.6f | "
-                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f hi_sup %.6f hi_rank %.6f hi_var %.6f"
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
+                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
+                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -512,6 +525,7 @@ class Trainer:
                 tr["train_hi_supervision"],
                 tr["train_hi_rank"],
                 tr["train_hi_var_penalty"],
+                tr["train_hi_smoothness"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
@@ -520,6 +534,7 @@ class Trainer:
                 va["valid_hi_supervision"],
                 va["valid_hi_rank"],
                 va["valid_hi_var_penalty"],
+                va["valid_hi_smoothness"],
             )
             self.logger.info(
                 "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",

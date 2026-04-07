@@ -80,6 +80,7 @@ class HealthIndicatorNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(16, 1),
         )
+        self.temporal_head = nn.Linear(tcn_channels, 1)
 
     def _extract_tcn_temporal_feat(self, tcn_seq: torch.Tensor | None, fallback_x: torch.Tensor) -> torch.Tensor:
         if tcn_seq is None:
@@ -93,8 +94,16 @@ class HealthIndicatorNet(nn.Module):
         last_feat = tcn_seq[:, -1, :]
         return torch.cat([mean_feat, std_feat, last_feat], dim=-1)
 
-    def forward(self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return HI scalar and raw HI input features."""
+    def _estimate_hi_sequence(self, tcn_seq: torch.Tensor | None) -> torch.Tensor | None:
+        if tcn_seq is None:
+            return None
+        hi_seq_logit = self.temporal_head(tcn_seq)
+        return torch.sigmoid(hi_seq_logit)
+
+    def forward(
+        self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Return HI scalar, raw HI input features, and optional temporal HI sequence."""
 
         stat_feat = self.extractor(x)
         temporal_feat = self._extract_tcn_temporal_feat(tcn_seq, fallback_x=x)
@@ -109,6 +118,7 @@ class HealthIndicatorNet(nn.Module):
         hi_feat_norm = self.norm(hi_feat)
         hi_logit = self.mlp(hi_feat_norm)
         hi_score = torch.sigmoid(hi_logit)
+        hi_temporal = self._estimate_hi_sequence(tcn_seq)
 
         # Keep deterministic [0,1] output per window (no batch-wise normalization).
-        return hi_score, hi_feat
+        return hi_score, hi_feat, hi_temporal

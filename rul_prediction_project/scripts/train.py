@@ -127,6 +127,7 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         hi_rank_weight=float(train_cfg_raw.get("hi_rank_weight", 0.0)),
         hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.0)),
         hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.03)),
+        hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.002)),
     )
 
 

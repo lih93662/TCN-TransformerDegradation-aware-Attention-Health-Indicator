@@ -129,10 +129,11 @@ class HybridRULModel(nn.Module):
 
         # HI module from raw input
         if self.use_hi and self.hi is not None:
-            hi_score, hi_stats = self.hi(x, tcn_seq=tcn_seq)
+            hi_score, hi_stats, hi_temporal = self.hi(x, tcn_seq=tcn_seq)
         else:
             hi_score = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
             hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
+            hi_temporal = None
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
@@ -159,6 +160,7 @@ class HybridRULModel(nn.Module):
             "pred": pred,
             "hi": hi_score,
             "hi_stats": hi_stats,
+            "hi_temporal": hi_temporal,
             "tcn_pool": tcn_pool,
             "transformer_pool": tr_pool,
             "degradation_feat": da_feat,

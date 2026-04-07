@@ -59,6 +59,7 @@ train:
   hi_rank_weight: 0.0
   hi_variance_weight: 0.0
   hi_variance_floor: 0.03
+  hi_smoothness_weight: 0.002
 
 evaluation:
   attention_num_samples: 3
