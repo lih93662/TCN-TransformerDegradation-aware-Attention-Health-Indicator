@@ -29,11 +29,13 @@ class ModelConfig:
     backbone_variant: str = "tcn_transformer"
     use_hi: bool = True
     hi_input_source: str = "tcn"
+    hi_output_temperature: float = 1.5
     use_attention: bool = True
     attention_use_hi_bias: bool = True
     attention_use_temporal_gate: bool = True
     attention_use_recency_bias: bool = True
     attention_conditioning_gain: float = 2.0
+    attention_head_bias_gain: float = 2.0
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
@@ -72,6 +74,7 @@ class HybridRULModel(nn.Module):
                 sensor_dim=cfg.sensor_dim,
                 tcn_channels=cfg.tcn_channels,
                 hi_input_source=cfg.hi_input_source,
+                output_temperature=cfg.hi_output_temperature,
             )
             if self.use_hi
             else None
@@ -89,6 +92,7 @@ class HybridRULModel(nn.Module):
                 use_temporal_gate=cfg.attention_use_temporal_gate,
                 use_recency_bias=cfg.attention_use_recency_bias,
                 conditioning_gain=cfg.attention_conditioning_gain,
+                head_bias_gain=cfg.attention_head_bias_gain,
             )
             attention_dim = cfg.transformer_embed_dim
         else:

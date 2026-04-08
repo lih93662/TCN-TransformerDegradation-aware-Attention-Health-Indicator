@@ -54,7 +54,13 @@ class HealthIndicatorNet(nn.Module):
         input_dim -> 32 -> 16 -> 1 -> sigmoid
     """
 
-    def __init__(self, sensor_dim: int, tcn_channels: int, hi_input_source: str = "tcn"):
+    def __init__(
+        self,
+        sensor_dim: int,
+        tcn_channels: int,
+        hi_input_source: str = "tcn",
+        output_temperature: float = 1.5,
+    ):
         super().__init__()
         self.hi_input_source = str(hi_input_source).lower()
         if self.hi_input_source not in {"stats", "tcn", "hybrid"}:
@@ -82,6 +88,7 @@ class HealthIndicatorNet(nn.Module):
         )
         self.temporal_head = nn.Linear(tcn_channels, 1)
         self.temporal_blend_weight = 0.3
+        self.output_temperature = max(float(output_temperature), 1e-3)
 
     def _extract_tcn_temporal_feat(self, tcn_seq: torch.Tensor | None, fallback_x: torch.Tensor) -> torch.Tensor:
         if tcn_seq is None:
@@ -99,7 +106,7 @@ class HealthIndicatorNet(nn.Module):
         if tcn_seq is None:
             return None, None
         hi_seq_logit = self.temporal_head(tcn_seq)
-        return torch.sigmoid(hi_seq_logit), hi_seq_logit
+        return torch.sigmoid(hi_seq_logit / self.output_temperature), hi_seq_logit
 
     def forward(
         self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None
@@ -122,7 +129,7 @@ class HealthIndicatorNet(nn.Module):
         if hi_temporal_logit is not None:
             end_logit = hi_temporal_logit[:, -1, :]
             hi_logit = (1.0 - self.temporal_blend_weight) * hi_logit + self.temporal_blend_weight * end_logit
-        hi_score = torch.sigmoid(hi_logit)
+        hi_score = torch.sigmoid(hi_logit / self.output_temperature)
 
         # Keep deterministic [0,1] output per window (no batch-wise normalization).
         return hi_score, hi_feat, hi_temporal, hi_temporal_logit

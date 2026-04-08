@@ -28,6 +28,7 @@ class DegradationAwareAttention(nn.Module):
         use_temporal_gate: bool = True,
         use_recency_bias: bool = True,
         conditioning_gain: float = 2.0,
+        head_bias_gain: float = 2.0,
     ):
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -42,6 +43,7 @@ class DegradationAwareAttention(nn.Module):
         self.use_temporal_gate = bool(use_temporal_gate)
         self.use_recency_bias = bool(use_recency_bias)
         self.conditioning_gain = float(conditioning_gain)
+        self.head_bias_gain = float(head_bias_gain)
 
         self.input_norm = nn.LayerNorm(embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
@@ -106,7 +108,7 @@ class DegradationAwareAttention(nn.Module):
             hi_std = torch.std(hi_score, dim=0, unbiased=False, keepdim=True).clamp_min(1e-4)
             hi_centered = (hi_score - hi_score.mean(dim=0, keepdim=True)) / hi_std
             cond_hi = torch.tanh(hi_centered) * self.conditioning_gain
-            head_bias = self.hi_to_head_bias(cond_hi).view(b, self.num_heads, 1, 1)
+            head_bias = self.head_bias_gain * self.hi_to_head_bias(cond_hi).view(b, self.num_heads, 1, 1)
         else:
             head_bias = torch.zeros((b, self.num_heads, 1, 1), dtype=x.dtype, device=x.device)
         if self.use_recency_bias:
