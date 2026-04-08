@@ -93,6 +93,7 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         attention_use_hi_bias=bool(m.get("attention_use_hi_bias", True)),
         attention_use_temporal_gate=bool(m.get("attention_use_temporal_gate", True)),
         attention_use_recency_bias=bool(m.get("attention_use_recency_bias", True)),
+        attention_conditioning_gain=float(m.get("attention_conditioning_gain", 2.0)),
         attention_temperature=float(m.get("attention_temperature", 1.0)),
         attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),

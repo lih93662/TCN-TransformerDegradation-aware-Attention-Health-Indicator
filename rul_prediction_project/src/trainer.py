@@ -158,6 +158,10 @@ class Trainer:
         attn_max_sum = 0.0
         attn_mean_sum = 0.0
         attn_std_sum = 0.0
+        attn_cond_hi_std_sum = 0.0
+        attn_head_bias_std_sum = 0.0
+        attn_degradation_bias_std_sum = 0.0
+        attn_delta_sum = 0.0
         attn_batches = 0
         attn_map_sum: np.ndarray | None = None
         hi_mean_sum = 0.0
@@ -241,6 +245,7 @@ class Trainer:
                     hi_batches += 1
 
                 attn = out.get("attn_map")
+                attn_debug = out.get("attention_debug")
                 if attn is not None:
                     attn_min = float(attn.min().item())
                     attn_max = float(attn.max().item())
@@ -250,6 +255,11 @@ class Trainer:
                     attn_max_sum += attn_max
                     attn_mean_sum += attn_mean
                     attn_std_sum += attn_std
+                    if attn_debug is not None:
+                        attn_cond_hi_std_sum += float(attn_debug["hi_cond_std"].item())
+                        attn_head_bias_std_sum += float(attn_debug["head_bias_std"].item())
+                        attn_degradation_bias_std_sum += float(attn_debug["degradation_bias_std"].item())
+                        attn_delta_sum += float(attn_debug["attn_delta_l1"].item())
                     attn_batches += 1
                     attn_2d = attn.detach().mean(dim=(0, 1)).cpu().numpy().astype(np.float32)
                     attn_map_sum = attn_2d if attn_map_sum is None else (attn_map_sum + attn_2d)
@@ -322,6 +332,10 @@ class Trainer:
             "attn_max": attn_max_sum / max(1, attn_batches),
             "attn_mean": attn_mean_sum / max(1, attn_batches),
             "attn_std": attn_std_sum / max(1, attn_batches),
+            "cond_hi_std": attn_cond_hi_std_sum / max(1, attn_batches),
+            "head_bias_std": attn_head_bias_std_sum / max(1, attn_batches),
+            "degradation_bias_std": attn_degradation_bias_std_sum / max(1, attn_batches),
+            "attn_delta_l1": attn_delta_sum / max(1, attn_batches),
             "num_batches_with_attention": float(attn_batches),
         }
 
@@ -552,8 +566,10 @@ class Trainer:
             )
             self.logger.info(
                 (
-                    "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
-                    "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
+                    "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f "
+                    "cond_hi_std %.5f head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f | "
+                    "valid min/max %.5f/%.5f mean/std %.5f/%.5f cond_hi_std %.5f "
+                    "head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -561,10 +577,18 @@ class Trainer:
                 tr_attn_stats["attn_max"],
                 tr_attn_stats["attn_mean"],
                 tr_attn_stats["attn_std"],
+                tr_attn_stats["cond_hi_std"],
+                tr_attn_stats["head_bias_std"],
+                tr_attn_stats["degradation_bias_std"],
+                tr_attn_stats["attn_delta_l1"],
                 va_attn_stats["attn_min"],
                 va_attn_stats["attn_max"],
                 va_attn_stats["attn_mean"],
                 va_attn_stats["attn_std"],
+                va_attn_stats["cond_hi_std"],
+                va_attn_stats["head_bias_std"],
+                va_attn_stats["degradation_bias_std"],
+                va_attn_stats["attn_delta_l1"],
             )
 
             improved_total = va["valid_total"] < self.best_val_total

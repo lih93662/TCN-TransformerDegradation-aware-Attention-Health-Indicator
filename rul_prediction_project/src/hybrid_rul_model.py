@@ -33,6 +33,7 @@ class ModelConfig:
     attention_use_hi_bias: bool = True
     attention_use_temporal_gate: bool = True
     attention_use_recency_bias: bool = True
+    attention_conditioning_gain: float = 2.0
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
@@ -87,6 +88,7 @@ class HybridRULModel(nn.Module):
                 use_hi_bias=cfg.attention_use_hi_bias,
                 use_temporal_gate=cfg.attention_use_temporal_gate,
                 use_recency_bias=cfg.attention_use_recency_bias,
+                conditioning_gain=cfg.attention_conditioning_gain,
             )
             attention_dim = cfg.transformer_embed_dim
         else:
@@ -139,7 +141,7 @@ class HybridRULModel(nn.Module):
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
             attn_hi = hi_score if self.cfg.attention_use_hi_bias else None
-            da_feat, attn_map, temporal_attn = self.degradation_attention(tr_seq, attn_hi)
+            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, attn_hi)
         else:
             da_feat = tr_pool
             temporal_attn = torch.full(
@@ -149,6 +151,7 @@ class HybridRULModel(nn.Module):
                 dtype=tr_seq.dtype,
             )
             attn_map = None
+            attention_debug = None
 
         # Stage 4: Feature fusion
         fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
@@ -167,6 +170,7 @@ class HybridRULModel(nn.Module):
             "transformer_pool": tr_pool,
             "degradation_feat": da_feat,
             "attn_map": attn_map,
+            "attention_debug": attention_debug,
             "temporal_attn": temporal_attn,
             "fusion_feat": fused,
         }

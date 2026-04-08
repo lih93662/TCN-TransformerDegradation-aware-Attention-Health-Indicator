@@ -29,6 +29,7 @@ model:
   attention_use_hi_bias: true
   attention_use_temporal_gate: true
   attention_use_recency_bias: true
+  attention_conditioning_gain: 2.0
   attention_temperature: 1.0
   attention_recency_strength: 0.5
   head_hidden_dim: 32

@@ -27,6 +27,7 @@ class DegradationAwareAttention(nn.Module):
         use_hi_bias: bool = True,
         use_temporal_gate: bool = True,
         use_recency_bias: bool = True,
+        conditioning_gain: float = 2.0,
     ):
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -40,6 +41,7 @@ class DegradationAwareAttention(nn.Module):
         self.use_hi_bias = bool(use_hi_bias)
         self.use_temporal_gate = bool(use_temporal_gate)
         self.use_recency_bias = bool(use_recency_bias)
+        self.conditioning_gain = float(conditioning_gain)
 
         self.input_norm = nn.LayerNorm(embed_dim)
         self.q_proj = nn.Linear(embed_dim, embed_dim)
@@ -74,7 +76,7 @@ class DegradationAwareAttention(nn.Module):
         self,
         x: torch.Tensor,
         hi_score: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass.
 
         Args:
@@ -99,8 +101,12 @@ class DegradationAwareAttention(nn.Module):
         key_life = life.view(1, 1, 1, t)
         temporal_life = life.view(1, t)
 
+        cond_hi = None
         if self.use_hi_bias and hi_score is not None:
-            head_bias = self.hi_to_head_bias(hi_score).view(b, self.num_heads, 1, 1)
+            hi_std = torch.std(hi_score, dim=0, unbiased=False, keepdim=True).clamp_min(1e-4)
+            hi_centered = (hi_score - hi_score.mean(dim=0, keepdim=True)) / hi_std
+            cond_hi = torch.tanh(hi_centered) * self.conditioning_gain
+            head_bias = self.hi_to_head_bias(cond_hi).view(b, self.num_heads, 1, 1)
         else:
             head_bias = torch.zeros((b, self.num_heads, 1, 1), dtype=x.dtype, device=x.device)
         if self.use_recency_bias:
@@ -108,7 +114,9 @@ class DegradationAwareAttention(nn.Module):
         else:
             degradation_bias = torch.zeros_like(logits)
 
+        base_scores = logits / self.temperature
         scores = (logits + degradation_bias) / self.temperature
+        base_attn = torch.softmax(base_scores, dim=-1)
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
 
@@ -134,4 +142,13 @@ class DegradationAwareAttention(nn.Module):
         temporal_weights = self.dropout(temporal_weights)
 
         weighted_vector = torch.sum(context * temporal_weights.unsqueeze(-1), dim=1)
-        return weighted_vector, attn, temporal_weights
+        debug = {
+            "hi_cond_mean": cond_hi.mean() if cond_hi is not None else torch.tensor(0.0, device=x.device, dtype=x.dtype),
+            "hi_cond_std": cond_hi.std(unbiased=False) if cond_hi is not None else torch.tensor(0.0, device=x.device, dtype=x.dtype),
+            "head_bias_mean": head_bias.mean(),
+            "head_bias_std": head_bias.std(unbiased=False),
+            "degradation_bias_mean": degradation_bias.mean(),
+            "degradation_bias_std": degradation_bias.std(unbiased=False),
+            "attn_delta_l1": torch.mean(torch.abs(attn - base_attn)),
+        }
+        return weighted_vector, attn, temporal_weights, debug
