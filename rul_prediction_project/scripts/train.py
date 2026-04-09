@@ -77,7 +77,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         backbone_variant=str(model_cfg_raw.get("backbone_variant", "tcn_transformer")),
         use_hi=bool(model_cfg_raw.get("use_hi", True)),
         hi_input_source=str(model_cfg_raw.get("hi_input_source", "tcn")),
-        hi_output_temperature=float(model_cfg_raw.get("hi_output_temperature", 1.5)),
+        hi_output_temperature=float(model_cfg_raw.get("hi_output_temperature", 1.2)),
         use_attention=bool(model_cfg_raw.get("use_attention", True)),
         attention_use_hi_bias=bool(model_cfg_raw.get("attention_use_hi_bias", True)),
         attention_use_hi_logit=bool(model_cfg_raw.get("attention_use_hi_logit", True)),
@@ -129,8 +129,8 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         correlation_regularization_weight=float(train_cfg_raw.get("correlation_regularization_weight", 0.0)),
         hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.0)),
         hi_rank_weight=float(train_cfg_raw.get("hi_rank_weight", 0.0)),
-        hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.02)),
-        hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.05)),
+        hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.03)),
+        hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.08)),
         hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.01)),
     )
 

@@ -44,8 +44,8 @@ class TrainerConfig:
     correlation_regularization_weight: float = 0.0
     hi_supervision_weight: float = 0.0
     hi_rank_weight: float = 0.0
-    hi_variance_weight: float = 0.02
-    hi_variance_floor: float = 0.05
+    hi_variance_weight: float = 0.03
+    hi_variance_floor: float = 0.08
     hi_smoothness_weight: float = 0.01
     collapse_std_threshold: float = 1e-4
 

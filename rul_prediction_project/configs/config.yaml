@@ -25,7 +25,7 @@ model:
   dropout: 0.3
   use_hi: true
   hi_input_source: "tcn"  # stats | tcn | hybrid
-  hi_output_temperature: 1.5
+  hi_output_temperature: 1.2
   use_attention: true
   attention_use_hi_bias: true
   attention_use_hi_logit: true
@@ -61,8 +61,8 @@ train:
   correlation_regularization_weight: 0.05
   hi_supervision_weight: 0.01
   hi_rank_weight: 0.0
-  hi_variance_weight: 0.02
-  hi_variance_floor: 0.05
+  hi_variance_weight: 0.03
+  hi_variance_floor: 0.08
   hi_smoothness_weight: 0.01
 
 evaluation:

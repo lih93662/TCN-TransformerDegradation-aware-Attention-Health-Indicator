@@ -89,7 +89,7 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         backbone_variant=str(m.get("backbone_variant", "tcn_transformer")),
         use_hi=bool(m.get("use_hi", True)),
         hi_input_source=str(m.get("hi_input_source", "tcn")),
-        hi_output_temperature=float(m.get("hi_output_temperature", 1.5)),
+        hi_output_temperature=float(m.get("hi_output_temperature", 1.2)),
         use_attention=bool(m.get("use_attention", True)),
         attention_use_hi_bias=bool(m.get("attention_use_hi_bias", True)),
         attention_use_hi_logit=bool(m.get("attention_use_hi_logit", True)),

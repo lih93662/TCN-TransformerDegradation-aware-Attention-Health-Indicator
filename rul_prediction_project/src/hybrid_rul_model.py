@@ -29,7 +29,7 @@ class ModelConfig:
     backbone_variant: str = "tcn_transformer"
     use_hi: bool = True
     hi_input_source: str = "tcn"
-    hi_output_temperature: float = 1.5
+    hi_output_temperature: float = 1.2
     use_attention: bool = True
     attention_use_hi_bias: bool = True
     attention_use_hi_logit: bool = True
