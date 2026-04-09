@@ -32,6 +32,7 @@ class ModelConfig:
     hi_output_temperature: float = 1.5
     use_attention: bool = True
     attention_use_hi_bias: bool = True
+    attention_use_hi_logit: bool = True
     attention_use_temporal_gate: bool = True
     attention_use_recency_bias: bool = True
     attention_conditioning_gain: float = 2.0
@@ -135,16 +136,19 @@ class HybridRULModel(nn.Module):
 
         # HI module from raw input
         if self.use_hi and self.hi is not None:
-            hi_score, hi_stats, hi_temporal, hi_temporal_logit = self.hi(x, tcn_seq=tcn_seq)
+            hi_score, hi_stats, hi_temporal, hi_temporal_logit, hi_logit = self.hi(x, tcn_seq=tcn_seq)
         else:
             hi_score = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
             hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
             hi_temporal = None
             hi_temporal_logit = None
+            hi_logit = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
-            attn_hi = hi_score if self.cfg.attention_use_hi_bias else None
+            attn_hi = hi_logit if self.cfg.attention_use_hi_logit else hi_score
+            if not self.cfg.attention_use_hi_bias:
+                attn_hi = None
             da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, attn_hi)
         else:
             da_feat = tr_pool
@@ -167,6 +171,7 @@ class HybridRULModel(nn.Module):
         return {
             "pred": pred,
             "hi": hi_score,
+            "hi_logit": hi_logit,
             "hi_stats": hi_stats,
             "hi_temporal": hi_temporal,
             "hi_temporal_logit": hi_temporal_logit,

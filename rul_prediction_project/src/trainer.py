@@ -196,7 +196,10 @@ class Trainer:
                     margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
                     hi_rank = torch.nn.functional.softplus(-margin).mean()
                 if self.config.hi_variance_weight > 0 and out.get("hi") is not None:
-                    hi_std = torch.std(out["hi"].view(-1), unbiased=False)
+                    hi_for_var = out.get("hi_logit")
+                    if hi_for_var is None:
+                        hi_for_var = out["hi"]
+                    hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
                     hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")

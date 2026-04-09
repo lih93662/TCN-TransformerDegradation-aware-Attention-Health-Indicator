@@ -80,6 +80,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         hi_output_temperature=float(model_cfg_raw.get("hi_output_temperature", 1.5)),
         use_attention=bool(model_cfg_raw.get("use_attention", True)),
         attention_use_hi_bias=bool(model_cfg_raw.get("attention_use_hi_bias", True)),
+        attention_use_hi_logit=bool(model_cfg_raw.get("attention_use_hi_logit", True)),
         attention_use_temporal_gate=bool(model_cfg_raw.get("attention_use_temporal_gate", True)),
         attention_use_recency_bias=bool(model_cfg_raw.get("attention_use_recency_bias", True)),
         attention_conditioning_gain=float(model_cfg_raw.get("attention_conditioning_gain", 2.0)),

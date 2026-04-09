@@ -110,8 +110,8 @@ class HealthIndicatorNet(nn.Module):
 
     def forward(
         self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Return HI scalar, HI input features, temporal HI sequence, and temporal logits."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
+        """Return HI scalar/features, temporal HI, temporal logits, and scalar pre-sigmoid logit."""
 
         stat_feat = self.extractor(x)
         temporal_feat = self._extract_tcn_temporal_feat(tcn_seq, fallback_x=x)
@@ -132,4 +132,4 @@ class HealthIndicatorNet(nn.Module):
         hi_score = torch.sigmoid(hi_logit / self.output_temperature)
 
         # Keep deterministic [0,1] output per window (no batch-wise normalization).
-        return hi_score, hi_feat, hi_temporal, hi_temporal_logit
+        return hi_score, hi_feat, hi_temporal, hi_temporal_logit, hi_logit

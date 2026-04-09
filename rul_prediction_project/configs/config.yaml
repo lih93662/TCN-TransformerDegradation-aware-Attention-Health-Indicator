@@ -28,6 +28,7 @@ model:
   hi_output_temperature: 1.5
   use_attention: true
   attention_use_hi_bias: true
+  attention_use_hi_logit: true
   attention_use_temporal_gate: true
   attention_use_recency_bias: true
   attention_conditioning_gain: 3.0
