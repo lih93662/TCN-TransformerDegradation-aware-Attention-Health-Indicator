@@ -199,8 +199,24 @@ class Trainer:
                     hi_for_var = out.get("hi_logit")
                     if hi_for_var is None:
                         hi_for_var = out["hi"]
-                    hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
-                    hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+                    batch_ids = list(batch.get("id", []))
+                    penalties = []
+                    if batch_ids:
+                        unique_ids = sorted(set(batch_ids))
+                        for uid in unique_ids:
+                            idx = [i for i, bid in enumerate(batch_ids) if bid == uid]
+                            if len(idx) < 2:
+                                continue
+                            idx_t = torch.as_tensor(idx, device=self.device, dtype=torch.long)
+                            hi_std_i = torch.std(hi_for_var.index_select(0, idx_t).view(-1), unbiased=False)
+                            penalties.append(
+                                torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std_i).pow(2)
+                            )
+                    if penalties:
+                        hi_var_pen = torch.stack(penalties).mean()
+                    else:
+                        hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
+                        hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")
                 if self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
