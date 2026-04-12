@@ -650,7 +650,10 @@ class Trainer:
 
     def evaluate(self, test_dataset) -> Dict[str, float]:
         if self.checkpoint_path.exists():
-            payload = torch.load(self.checkpoint_path, map_location=self.device)
+            try:
+                payload = torch.load(self.checkpoint_path, map_location=self.device, weights_only=True)
+            except TypeError:
+                payload = torch.load(self.checkpoint_path, map_location=self.device)
             self.model.load_state_dict(payload["model_state"])
             self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 

@@ -49,6 +49,12 @@ from src.visualization import (
     plot_single_bearing_prediction,
 )
 
+def _safe_load_checkpoint(path: Path, device: torch.device) -> Dict:
+    try:
+        return torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate hybrid PHM2012 RUL model")
@@ -156,7 +162,7 @@ def main() -> None:
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
-    payload = torch.load(ckpt, map_location=device)
+    payload = _safe_load_checkpoint(ckpt, device)
     model.load_state_dict(payload["model_state"])
     logger.info("Loaded checkpoint %s from epoch %s", ckpt, payload.get("epoch", "unknown"))
 
