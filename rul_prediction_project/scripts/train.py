@@ -172,6 +172,10 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
         train_balance_target=str(data_cfg.get("train_balance_target", "median")),
         train_balance_custom_count=data_cfg.get("train_balance_custom_count"),
         train_balance_seed=data_cfg.get("train_balance_seed"),
+        auto_valid_bearings_count=int(data_cfg.get("auto_valid_bearings_count", 1)),
+        max_auto_valid_tries=int(data_cfg.get("max_auto_valid_tries", 16)),
+        min_valid_active_bins=int(data_cfg.get("min_valid_active_bins", 3)),
+        valid_skew_ratio_warn=float(data_cfg.get("valid_skew_ratio_warn", 25.0)),
     )
     stats = summarize_dataset(prepared)
     logger.info("Dataset summary: %s", stats)

@@ -137,6 +137,47 @@ def split_official_learning_test(
     return train_runs, valid_runs, test_runs
 
 
+def _bearing_suffix_id(bearing_id: str) -> str:
+    tokens = str(bearing_id).split("_")
+    if len(tokens) >= 2:
+        return "_".join(tokens[-2:])
+    return str(bearing_id)
+
+
+def _resolve_valid_bearing_ids(
+    learning_runs: Sequence[BearingRun],
+    valid_bearing_ids: Sequence[str] | None,
+) -> List[str]:
+    if not valid_bearing_ids:
+        return []
+    by_full = {str(r.bearing_id): str(r.bearing_id) for r in learning_runs}
+    by_suffix = {_bearing_suffix_id(r.bearing_id): str(r.bearing_id) for r in learning_runs}
+    resolved: List[str] = []
+    for raw_id in valid_bearing_ids:
+        candidate = str(raw_id)
+        if candidate in by_full:
+            resolved.append(by_full[candidate])
+            continue
+        suffix = _bearing_suffix_id(candidate)
+        if suffix in by_suffix:
+            resolved.append(by_suffix[suffix])
+    return sorted(set(resolved))
+
+
+def _auto_select_valid_bearings(
+    learning_runs: Sequence[BearingRun],
+    seed: int,
+    count: int,
+) -> List[str]:
+    if not learning_runs:
+        return []
+    k = max(1, min(int(count), 2, len(learning_runs)))
+    shuffled = list(learning_runs)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(shuffled)
+    return [str(r.bearing_id) for r in shuffled[:k]]
+
+
 def compute_linear_rul(cycles: np.ndarray, max_rul: int = 125) -> np.ndarray:
     """Compute linear RUL labels, optionally with clipping.
 
@@ -397,7 +438,12 @@ def _normalize_bin_edges(bin_edges: Sequence[float] | None) -> np.ndarray:
         raise ValueError(f"rul_bin_edges must be strictly increasing, got: {edges.tolist()}")
     if edges[0] > 0.0:
         edges = np.concatenate([np.array([0.0], dtype=np.float32), edges], axis=0)
-    if not np.isinf(edges[-1]):
+    if np.isinf(edges[-1]):
+        return edges.astype(np.float32)
+    if edges[-1] >= 1.0:
+        edges = edges.copy()
+        edges[-1] = np.inf
+    else:
         edges = np.concatenate([edges, np.array([np.inf], dtype=np.float32)], axis=0)
     return edges.astype(np.float32)
 
@@ -520,6 +566,10 @@ def prepare_datasets(
     train_balance_target: str = "median",
     train_balance_custom_count: int | None = None,
     train_balance_seed: int | None = None,
+    auto_valid_bearings_count: int = 1,
+    max_auto_valid_tries: int = 16,
+    min_valid_active_bins: int = 3,
+    valid_skew_ratio_warn: float = 25.0,
 ) -> PreparedData:
     """Prepare train/valid/test datasets from PHM2012 raw files.
 
@@ -540,66 +590,144 @@ def prepare_datasets(
     root = Path(dataset_root)
     runs = load_all_bearings(root)
 
-    selected_valid_ids = valid_bearing_ids
+    bin_edges = _normalize_bin_edges(rul_bin_edges)
+    learning_runs = [r for r in runs if r.split == "Learning_set"] or list(runs)
+    explicit_valid_ids = list(valid_bearing_ids) if valid_bearing_ids else []
     if valid_split_variant:
         variant_key = str(valid_split_variant).strip()
         if variant_key not in VALID_SPLIT_VARIANTS:
             raise ValueError(
                 f"Unknown valid_split_variant='{variant_key}'. Available: {sorted(VALID_SPLIT_VARIANTS.keys())}"
             )
-        selected_valid_ids = list(VALID_SPLIT_VARIANTS[variant_key])
+        explicit_valid_ids = list(VALID_SPLIT_VARIANTS[variant_key])
+    resolved_explicit_valid = _resolve_valid_bearing_ids(learning_runs, explicit_valid_ids)
 
-    train_runs, valid_runs, test_runs = split_official_learning_test(
-        runs=runs,
-        valid_ratio=valid_ratio,
-        seed=seed,
-        valid_bearing_ids=selected_valid_ids,
-    )
+    attempts = max(1, int(max_auto_valid_tries))
+    best_payload: Dict[str, object] | None = None
+    for attempt in range(attempts):
+        if resolved_explicit_valid:
+            selected_valid_ids = resolved_explicit_valid
+        else:
+            selected_valid_ids = _auto_select_valid_bearings(
+                learning_runs=learning_runs,
+                seed=int(seed + attempt),
+                count=auto_valid_bearings_count,
+            )
+        train_runs, valid_runs, test_runs = split_official_learning_test(
+            runs=runs,
+            valid_ratio=valid_ratio,
+            seed=seed + attempt,
+            valid_bearing_ids=selected_valid_ids,
+        )
+        train_ids = {r.bearing_id for r in train_runs}
+        valid_ids = {r.bearing_id for r in valid_runs}
+        if not valid_ids:
+            print("WARNING: validation run set is empty; reselection attempt", attempt + 1)
+            continue
+        if train_ids.intersection(valid_ids):
+            raise RuntimeError(f"Data leakage detected: train/valid overlap {sorted(train_ids.intersection(valid_ids))}")
+
+        scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim, mode=scaler_mode)
+        target_scale = compute_target_scale(train_runs, max_rul=max_rul)
+        x_train, y_train, id_train = _runs_to_samples(
+            runs=train_runs,
+            scaler=scaler,
+            window_size=window_size,
+            stride=stride,
+            max_rul=max_rul,
+            label_scale=target_scale,
+            sensor_dim=sensor_dim,
+            max_windows_per_bearing=max_windows_per_bearing,
+            seed=seed,
+        )
+        x_valid, y_valid, id_valid = _runs_to_samples(
+            runs=valid_runs,
+            scaler=scaler,
+            window_size=window_size,
+            stride=stride,
+            max_rul=max_rul,
+            label_scale=target_scale,
+            sensor_dim=sensor_dim,
+            max_windows_per_bearing=max_windows_per_bearing,
+            seed=seed,
+        )
+        x_test, y_test, id_test = _runs_to_samples(
+            runs=test_runs,
+            scaler=scaler,
+            window_size=window_size,
+            stride=stride,
+            max_rul=max_rul,
+            label_scale=target_scale,
+            sensor_dim=sensor_dim,
+            max_windows_per_bearing=max_windows_per_bearing,
+            seed=seed,
+        )
+        valid_bins = _rul_bin_histogram(y_valid, bin_edges)
+        active_valid_bins = sum(1 for c in valid_bins.values() if c > 0)
+        non_zero_counts = [c for c in valid_bins.values() if c > 0]
+        skew_ratio = (max(non_zero_counts) / max(min(non_zero_counts), 1)) if non_zero_counts else float("inf")
+        best_payload = {
+            "train_runs": train_runs,
+            "valid_runs": valid_runs,
+            "test_runs": test_runs,
+            "scaler": scaler,
+            "detected_cols": detected_cols,
+            "target_scale": target_scale,
+            "x_train": x_train,
+            "y_train": y_train,
+            "id_train": id_train,
+            "x_valid": x_valid,
+            "y_valid": y_valid,
+            "id_valid": id_valid,
+            "x_test": x_test,
+            "y_test": y_test,
+            "id_test": id_test,
+            "valid_bins": valid_bins,
+            "active_valid_bins": active_valid_bins,
+            "valid_skew_ratio": skew_ratio,
+        }
+        if y_valid.size == 0:
+            print("WARNING: validation windows are empty; reselection attempt", attempt + 1)
+            if resolved_explicit_valid:
+                break
+            continue
+        if active_valid_bins < int(min_valid_active_bins):
+            print(
+                f"WARNING: validation RUL coverage is narrow ({active_valid_bins} active bins); reselection attempt {attempt + 1}"
+            )
+            if resolved_explicit_valid:
+                break
+            continue
+        break
+
+    if best_payload is None:
+        raise RuntimeError("Failed to produce non-empty validation split. Check valid bearing settings.")
+
+    train_runs = best_payload["train_runs"]
+    valid_runs = best_payload["valid_runs"]
+    test_runs = best_payload["test_runs"]
+    scaler = best_payload["scaler"]
+    detected_cols = best_payload["detected_cols"]
+    target_scale = best_payload["target_scale"]
+    x_train = best_payload["x_train"]
+    y_train = best_payload["y_train"]
+    id_train = best_payload["id_train"]
+    x_valid = best_payload["x_valid"]
+    y_valid = best_payload["y_valid"]
+    id_valid = best_payload["id_valid"]
+    x_test = best_payload["x_test"]
+    y_test = best_payload["y_test"]
+    id_test = best_payload["id_test"]
+    valid_bins = best_payload["valid_bins"]
+    valid_skew_ratio = float(best_payload["valid_skew_ratio"])
 
     print("Train runs:", [r.bearing_id for r in train_runs])
     print("Valid runs:", [r.bearing_id for r in valid_runs])
     print("Test runs:", [r.bearing_id for r in test_runs])
+    if valid_skew_ratio > float(valid_skew_ratio_warn):
+        print(f"WARNING: validation RUL-bin skew ratio is high ({valid_skew_ratio:.2f}).")
 
-    scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim, mode=scaler_mode)
-    target_scale = compute_target_scale(train_runs, max_rul=max_rul)
-
-    x_train, y_train, id_train = _runs_to_samples(
-        runs=train_runs,
-        scaler=scaler,
-        window_size=window_size,
-        stride=stride,
-        max_rul=max_rul,
-        label_scale=target_scale,
-        sensor_dim=sensor_dim,
-        max_windows_per_bearing=max_windows_per_bearing,
-        seed=seed,
-    )
-    x_valid, y_valid, id_valid = _runs_to_samples(
-        runs=valid_runs,
-        scaler=scaler,
-        window_size=window_size,
-        stride=stride,
-        max_rul=max_rul,
-        label_scale=target_scale,
-        sensor_dim=sensor_dim,
-        max_windows_per_bearing=max_windows_per_bearing,
-        seed=seed,
-    )
-    x_test, y_test, id_test = _runs_to_samples(
-        runs=test_runs,
-        scaler=scaler,
-        window_size=window_size,
-        stride=stride,
-        max_rul=max_rul,
-        label_scale=target_scale,
-        sensor_dim=sensor_dim,
-        max_windows_per_bearing=max_windows_per_bearing,
-        seed=seed,
-    )
-
-    bin_edges = _normalize_bin_edges(rul_bin_edges)
     pre_balance_train_bins = _rul_bin_histogram(y_train, bin_edges)
-    valid_bins = _rul_bin_histogram(y_valid, bin_edges)
     test_bins = _rul_bin_histogram(y_test, bin_edges)
 
     if x_train.shape[0] == 0:
@@ -635,8 +763,11 @@ def prepare_datasets(
     if x_test.size and x_test.shape[-1] != x_train.shape[-1]:
         raise RuntimeError("Test sensor dimension mismatch with training set.")
 
+    if len(x_valid) == 0:
+        raise RuntimeError("Validation dataset is empty after split selection. Aborting to prevent leakage.")
+
     train_ds = PHM2012RULDataset(x_train, y_train, id_train)
-    valid_ds = PHM2012RULDataset(x_valid, y_valid, id_valid) if len(x_valid) else train_ds
+    valid_ds = PHM2012RULDataset(x_valid, y_valid, id_valid)
     test_ds = PHM2012RULDataset(x_test, y_test, id_test) if len(x_test) else valid_ds
 
     def _split_diag(ids: List[str], y: np.ndarray) -> Dict[str, object]:

@@ -5,5 +5,4 @@ experiment:
 
 data:
   balance_train_rul_bins: false
-  valid_split_variant: official_default
-
+  valid_split_variant: null

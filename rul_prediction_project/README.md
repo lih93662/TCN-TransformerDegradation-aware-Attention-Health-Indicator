@@ -118,6 +118,7 @@ python scripts/run_ablation.py --suite all --dry-run
 Data-side controls live in `configs/config.yaml`:
 
 - `valid_bearing_ids` / `valid_split_variant`: run-level validation split selection (anti-leakage preserved).
+- `auto_valid_bearings_count`: when no valid IDs are supplied, auto-select 1-2 learning bearings for validation.
 - `balance_train_rul_bins`: enable training-only RUL-stage balancing.
 - `rul_bin_edges`: normalized RUL bins (default `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]`, plus open-ended final bin).
 - `train_balance_mode`: `oversample | downsample | hybrid`.

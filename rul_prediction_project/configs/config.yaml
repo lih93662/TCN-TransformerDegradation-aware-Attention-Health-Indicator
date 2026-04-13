@@ -11,7 +11,11 @@ data:
   max_rul: 0
   valid_ratio: 0.33
   valid_bearing_ids: []  # optional explicit validation run ids
-  valid_split_variant: "official_default"  # official_default | alt_bearing1_1 | alt_bearing1_2 | alt_bearing2_1 | alt_bearing3_1 | alt_bearing3_2
+  valid_split_variant: null  # optional preset: official_default | alt_bearing1_1 | alt_bearing1_2 | alt_bearing2_1 | alt_bearing3_1 | alt_bearing3_2
+  auto_valid_bearings_count: 1
+  max_auto_valid_tries: 16
+  min_valid_active_bins: 3
+  valid_skew_ratio_warn: 25.0
   sensor_dim: 2
   max_windows_per_bearing: 20000
   scaler_mode: "standard"  # standard | robust
