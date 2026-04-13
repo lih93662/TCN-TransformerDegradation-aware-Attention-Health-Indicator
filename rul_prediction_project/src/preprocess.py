@@ -82,6 +82,17 @@ class PreparedData:
     split_diagnostics: Dict[str, object]
 
 
+DEFAULT_RUL_BIN_EDGES: Tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+VALID_SPLIT_VARIANTS: Dict[str, Tuple[str, ...]] = {
+    "official_default": ("Bearing2_2",),
+    "alt_bearing1_1": ("Bearing1_1",),
+    "alt_bearing1_2": ("Bearing1_2",),
+    "alt_bearing2_1": ("Bearing2_1",),
+    "alt_bearing3_1": ("Bearing3_1",),
+    "alt_bearing3_2": ("Bearing3_2",),
+}
+
+
 
 
 def split_official_learning_test(
@@ -378,6 +389,117 @@ def _runs_to_samples(
     return np.concatenate(all_x, axis=0), np.concatenate(all_y, axis=0), all_ids
 
 
+def _normalize_bin_edges(bin_edges: Sequence[float] | None) -> np.ndarray:
+    edges = np.asarray(bin_edges if bin_edges else DEFAULT_RUL_BIN_EDGES, dtype=np.float32)
+    if edges.ndim != 1 or edges.size < 2:
+        raise ValueError("rul_bin_edges must contain at least two values.")
+    if np.any(np.diff(edges) <= 0):
+        raise ValueError(f"rul_bin_edges must be strictly increasing, got: {edges.tolist()}")
+    if edges[0] > 0.0:
+        edges = np.concatenate([np.array([0.0], dtype=np.float32), edges], axis=0)
+    if not np.isinf(edges[-1]):
+        edges = np.concatenate([edges, np.array([np.inf], dtype=np.float32)], axis=0)
+    return edges.astype(np.float32)
+
+
+def _rul_bin_labels(bin_edges: np.ndarray) -> List[str]:
+    labels: List[str] = []
+    for idx in range(len(bin_edges) - 1):
+        left = float(bin_edges[idx])
+        right = float(bin_edges[idx + 1])
+        if idx == 0:
+            labels.append(f"[{left:.1f},{right:.1f}]")
+        elif np.isinf(right):
+            labels.append(f"({left:.1f},1.0+]")
+        else:
+            labels.append(f"({left:.1f},{right:.1f}]")
+    return labels
+
+
+def _rul_bin_histogram(y: np.ndarray, bin_edges: np.ndarray) -> Dict[str, int]:
+    labels = _rul_bin_labels(bin_edges)
+    hist, _ = np.histogram(y, bins=bin_edges) if y.size else (np.zeros(len(labels), dtype=np.int64), bin_edges)
+    return {label: int(hist[idx]) for idx, label in enumerate(labels)}
+
+
+def _resolve_balance_target_count(
+    counts: np.ndarray,
+    mode: str,
+    target: str,
+    custom_target: int | None,
+) -> int:
+    active = counts[counts > 0]
+    if active.size == 0:
+        return 0
+    target_key = target.lower()
+    if target_key == "custom":
+        if custom_target is None or int(custom_target) <= 0:
+            raise ValueError("train_balance_target='custom' requires positive train_balance_custom_count.")
+        return int(custom_target)
+    if target_key == "min":
+        return int(np.min(active))
+    if target_key == "median":
+        return int(np.median(active))
+    if target_key == "max":
+        return int(np.max(active))
+    if target_key == "auto":
+        if mode == "downsample":
+            return int(np.min(active))
+        if mode == "oversample":
+            return int(np.max(active))
+        return int(np.median(active))
+    raise ValueError(f"Unsupported train_balance_target: {target}")
+
+
+def _balance_train_samples_by_rul_bins(
+    x: np.ndarray,
+    y: np.ndarray,
+    ids: List[str],
+    bin_edges: np.ndarray,
+    mode: str,
+    target: str,
+    custom_target: int | None,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    if x.shape[0] == 0:
+        return x, y, ids
+
+    mode = mode.lower()
+    if mode not in {"oversample", "downsample", "hybrid"}:
+        raise ValueError(f"Unsupported train_balance_mode: {mode}")
+
+    bin_idx = np.digitize(y, bins=bin_edges[1:-1], right=True)
+    num_bins = len(bin_edges) - 1
+    counts = np.bincount(bin_idx, minlength=num_bins)
+    target_count = _resolve_balance_target_count(counts, mode=mode, target=target, custom_target=custom_target)
+    if target_count <= 0:
+        return x, y, ids
+
+    rng = np.random.default_rng(seed)
+    sampled_idx: List[np.ndarray] = []
+    for b in range(num_bins):
+        idx = np.where(bin_idx == b)[0]
+        if idx.size == 0:
+            continue
+        if mode == "oversample":
+            take = max(target_count, idx.size)
+            chosen = rng.choice(idx, size=take, replace=take > idx.size)
+        elif mode == "downsample":
+            take = min(target_count, idx.size)
+            chosen = rng.choice(idx, size=take, replace=False)
+        else:  # hybrid
+            take = target_count
+            chosen = rng.choice(idx, size=take, replace=take > idx.size)
+        sampled_idx.append(chosen)
+
+    if not sampled_idx:
+        return x, y, ids
+
+    merged_idx = np.concatenate(sampled_idx, axis=0)
+    rng.shuffle(merged_idx)
+    return x[merged_idx], y[merged_idx], [ids[i] for i in merged_idx.tolist()]
+
+
 def prepare_datasets(
     dataset_root: str | Path = DEFAULT_DATASET_PATH,
     window_size: int = 40,
@@ -389,8 +511,15 @@ def prepare_datasets(
     max_windows_per_bearing: int = 20000,
     scaler_mode: str = "standard",
     valid_bearing_ids: Sequence[str] | None = None,
+    valid_split_variant: str | None = None,
     late_stage_threshold: float = 0.2,
     late_stage_oversample_factor: float = 1.0,
+    balance_train_rul_bins: bool = False,
+    rul_bin_edges: Sequence[float] | None = None,
+    train_balance_mode: str = "hybrid",
+    train_balance_target: str = "median",
+    train_balance_custom_count: int | None = None,
+    train_balance_seed: int | None = None,
 ) -> PreparedData:
     """Prepare train/valid/test datasets from PHM2012 raw files.
 
@@ -411,11 +540,20 @@ def prepare_datasets(
     root = Path(dataset_root)
     runs = load_all_bearings(root)
 
+    selected_valid_ids = valid_bearing_ids
+    if valid_split_variant:
+        variant_key = str(valid_split_variant).strip()
+        if variant_key not in VALID_SPLIT_VARIANTS:
+            raise ValueError(
+                f"Unknown valid_split_variant='{variant_key}'. Available: {sorted(VALID_SPLIT_VARIANTS.keys())}"
+            )
+        selected_valid_ids = list(VALID_SPLIT_VARIANTS[variant_key])
+
     train_runs, valid_runs, test_runs = split_official_learning_test(
         runs=runs,
         valid_ratio=valid_ratio,
         seed=seed,
-        valid_bearing_ids=valid_bearing_ids,
+        valid_bearing_ids=selected_valid_ids,
     )
 
     print("Train runs:", [r.bearing_id for r in train_runs])
@@ -459,6 +597,11 @@ def prepare_datasets(
         seed=seed,
     )
 
+    bin_edges = _normalize_bin_edges(rul_bin_edges)
+    pre_balance_train_bins = _rul_bin_histogram(y_train, bin_edges)
+    valid_bins = _rul_bin_histogram(y_valid, bin_edges)
+    test_bins = _rul_bin_histogram(y_test, bin_edges)
+
     if x_train.shape[0] == 0:
         raise RuntimeError("No training windows were generated. Check dataset structure.")
 
@@ -474,6 +617,18 @@ def prepare_datasets(
                 y_train = np.concatenate([y_train, y_train[add_idx]], axis=0)
                 id_train = id_train + [id_train[i] for i in add_idx.tolist()]
 
+    if bool(balance_train_rul_bins):
+        x_train, y_train, id_train = _balance_train_samples_by_rul_bins(
+            x=x_train,
+            y=y_train,
+            ids=id_train,
+            bin_edges=bin_edges,
+            mode=train_balance_mode,
+            target=train_balance_target,
+            custom_target=train_balance_custom_count,
+            seed=int(seed if train_balance_seed is None else train_balance_seed),
+        )
+
     # Guard against silent shape drift between splits.
     if x_valid.size and x_valid.shape[-1] != x_train.shape[-1]:
         raise RuntimeError("Validation sensor dimension mismatch with training set.")
@@ -486,29 +641,35 @@ def prepare_datasets(
 
     def _split_diag(ids: List[str], y: np.ndarray) -> Dict[str, object]:
         unique, counts = np.unique(np.asarray(ids, dtype=object), return_counts=True) if ids else (np.array([]), np.array([]))
-        bins = np.array([0.0, 0.2, 0.4, 0.6, 0.8, np.inf], dtype=np.float32)
-        hist, _ = np.histogram(y, bins=bins) if y.size else (np.zeros(5, dtype=np.int64), bins)
         return {
             "windows_per_bearing": {str(u): int(c) for u, c in zip(unique.tolist(), counts.tolist())},
-            "rul_bin_counts": {
-                "[0.0,0.2]": int(hist[0]),
-                "(0.2,0.4]": int(hist[1]),
-                "(0.4,0.6]": int(hist[2]),
-                "(0.6,0.8]": int(hist[3]),
-                "(0.8,1.0+]": int(hist[4]),
-            },
+            "rul_bin_counts": _rul_bin_histogram(y, bin_edges),
         }
 
     split_diagnostics = {
         "window_size": int(window_size),
         "stride": int(stride),
         "scaler_mode": str(scaler_mode),
+        "valid_split_variant": str(valid_split_variant or ""),
+        "valid_bearing_ids": [r.bearing_id for r in valid_runs],
         "late_stage_threshold": float(late_stage_threshold),
         "late_stage_oversample_factor": float(late_stage_oversample_factor),
+        "balance_train_rul_bins": bool(balance_train_rul_bins),
+        "rul_bin_edges": [float(v) for v in bin_edges.tolist()],
+        "train_balance_mode": str(train_balance_mode),
+        "train_balance_target": str(train_balance_target),
+        "train_balance_custom_count": None if train_balance_custom_count is None else int(train_balance_custom_count),
+        "train_balance_seed": int(seed if train_balance_seed is None else train_balance_seed),
+        "rul_bin_counts_before_balance": {
+            "train": pre_balance_train_bins,
+            "valid": valid_bins,
+            "test": test_bins,
+        },
         "train": _split_diag(id_train, y_train),
         "valid": _split_diag(id_valid, y_valid),
         "test": _split_diag(id_test, y_test),
     }
+    print("Split diagnostics:", split_diagnostics)
 
     return PreparedData(
         train_dataset=train_ds,

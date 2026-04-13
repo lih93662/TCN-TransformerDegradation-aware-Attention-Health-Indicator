@@ -11,11 +11,18 @@ data:
   max_rul: 0
   valid_ratio: 0.33
   valid_bearing_ids: []  # optional explicit validation run ids
+  valid_split_variant: "official_default"  # official_default | alt_bearing1_1 | alt_bearing1_2 | alt_bearing2_1 | alt_bearing3_1 | alt_bearing3_2
   sensor_dim: 2
   max_windows_per_bearing: 20000
   scaler_mode: "standard"  # standard | robust
   late_stage_threshold: 0.2
   late_stage_oversample_factor: 1.0
+  balance_train_rul_bins: false
+  rul_bin_edges: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  train_balance_mode: "hybrid"  # oversample | downsample | hybrid
+  train_balance_target: "median"  # auto | min | median | max | custom
+  train_balance_custom_count: null
+  train_balance_seed: null  # falls back to experiment seed
 
 model:
   backbone_variant: "tcn_transformer"   # tcn_transformer | tcn_only | transformer_only

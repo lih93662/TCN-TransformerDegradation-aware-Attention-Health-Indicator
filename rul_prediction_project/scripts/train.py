@@ -163,8 +163,15 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
         max_windows_per_bearing=int(data_cfg.get("max_windows_per_bearing", 20000)),
         scaler_mode=str(data_cfg.get("scaler_mode", "standard")),
         valid_bearing_ids=data_cfg.get("valid_bearing_ids"),
+        valid_split_variant=data_cfg.get("valid_split_variant"),
         late_stage_threshold=float(data_cfg.get("late_stage_threshold", 0.2)),
         late_stage_oversample_factor=float(data_cfg.get("late_stage_oversample_factor", 1.0)),
+        balance_train_rul_bins=bool(data_cfg.get("balance_train_rul_bins", False)),
+        rul_bin_edges=data_cfg.get("rul_bin_edges"),
+        train_balance_mode=str(data_cfg.get("train_balance_mode", "hybrid")),
+        train_balance_target=str(data_cfg.get("train_balance_target", "median")),
+        train_balance_custom_count=data_cfg.get("train_balance_custom_count"),
+        train_balance_seed=data_cfg.get("train_balance_seed"),
     )
     stats = summarize_dataset(prepared)
     logger.info("Dataset summary: %s", stats)

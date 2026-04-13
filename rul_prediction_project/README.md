@@ -113,6 +113,27 @@ python scripts/run_ablation.py --suite optimization
 python scripts/run_ablation.py --suite all --dry-run
 ```
 
+## Data Split & Sampling Experiments
+
+Data-side controls live in `configs/config.yaml`:
+
+- `valid_bearing_ids` / `valid_split_variant`: run-level validation split selection (anti-leakage preserved).
+- `balance_train_rul_bins`: enable training-only RUL-stage balancing.
+- `rul_bin_edges`: normalized RUL bins (default `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]`, plus open-ended final bin).
+- `train_balance_mode`: `oversample | downsample | hybrid`.
+- `train_balance_target`: `auto | min | median | max | custom`.
+- `train_balance_custom_count`: target count per bin when `custom`.
+- `train_balance_seed`: balancing seed (falls back to experiment seed).
+
+Ready-to-run presets for data comparisons:
+
+```bash
+python scripts/train.py --config configs/data_compare/baseline_data.yaml
+python scripts/train.py --config configs/data_compare/balanced_train.yaml
+python scripts/train.py --config configs/data_compare/alt_valid_split.yaml
+python scripts/train.py --config configs/data_compare/balanced_train_alt_valid.yaml
+```
+
 ## Online Prediction
 
 Single file:

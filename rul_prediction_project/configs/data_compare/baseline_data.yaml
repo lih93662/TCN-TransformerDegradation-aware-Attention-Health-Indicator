@@ -1,0 +1,9 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: data_baseline
+
+data:
+  balance_train_rul_bins: false
+  valid_split_variant: official_default
+
