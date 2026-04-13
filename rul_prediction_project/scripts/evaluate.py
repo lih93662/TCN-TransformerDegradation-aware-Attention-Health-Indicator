@@ -149,6 +149,10 @@ def main() -> None:
         seed=seed,
         sensor_dim=int(data_cfg.get("sensor_dim", 2)),
         max_windows_per_bearing=int(data_cfg.get("max_windows_per_bearing", 20000)),
+        scaler_mode=str(data_cfg.get("scaler_mode", "standard")),
+        valid_bearing_ids=data_cfg.get("valid_bearing_ids"),
+        late_stage_threshold=float(data_cfg.get("late_stage_threshold", 0.2)),
+        late_stage_oversample_factor=float(data_cfg.get("late_stage_oversample_factor", 1.0)),
     )
 
     split_dataset = prepared.test_dataset if args.split == "test" else prepared.valid_dataset

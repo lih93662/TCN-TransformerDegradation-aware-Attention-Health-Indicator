@@ -79,6 +79,7 @@ class PreparedData:
     feature_dim: int
     detected_sensor_columns: List[str]
     target_scale: float
+    split_diagnostics: Dict[str, object]
 
 
 
@@ -87,6 +88,7 @@ def split_official_learning_test(
     runs: Sequence[BearingRun],
     valid_ratio: float = 0.33,
     seed: int = 42,
+    valid_bearing_ids: Sequence[str] | None = None,
 ) -> Tuple[List[BearingRun], List[BearingRun], List[BearingRun]]:
     """Split PHM2012 runs by official set first, then random train/valid on Learning_set.
 
@@ -105,13 +107,18 @@ def split_official_learning_test(
         learning_runs = list(runs)
         test_runs = []
 
-    shuffled = list(learning_runs)
-    rng = np.random.default_rng(seed)
-    rng.shuffle(shuffled)
+    if valid_bearing_ids:
+        valid_set = {str(v) for v in valid_bearing_ids}
+        valid_runs = [r for r in learning_runs if r.bearing_id in valid_set]
+        train_runs = [r for r in learning_runs if r.bearing_id not in valid_set]
+    else:
+        shuffled = list(learning_runs)
+        rng = np.random.default_rng(seed)
+        rng.shuffle(shuffled)
 
-    valid_size = max(1, int(len(shuffled) * valid_ratio))
-    valid_runs = shuffled[:valid_size]
-    train_runs = shuffled[valid_size:]
+        valid_size = max(1, int(len(shuffled) * valid_ratio))
+        valid_runs = shuffled[:valid_size]
+        train_runs = shuffled[valid_size:]
 
     if not train_runs:
         train_runs, valid_runs = valid_runs, train_runs
@@ -201,7 +208,11 @@ def _select_sensor_columns(run: BearingRun, sensor_dim: int) -> List[str]:
     return candidates[:sensor_dim]
 
 
-def fit_scaler(train_runs: Sequence[BearingRun], sensor_dim: int = 2) -> Tuple[StandardScaler, List[str]]:
+def fit_scaler(
+    train_runs: Sequence[BearingRun],
+    sensor_dim: int = 2,
+    mode: str = "standard",
+) -> Tuple[StandardScaler, List[str]]:
     """Fit a global channel-wise scaler from training runs only.
 
     Args:
@@ -230,8 +241,17 @@ def fit_scaler(train_runs: Sequence[BearingRun], sensor_dim: int = 2) -> Tuple[S
         raise RuntimeError("No training runs available to fit scaler.")
 
     stacked = np.concatenate(mats, axis=0)
-    mean_ = np.mean(stacked, axis=0).astype(np.float32)
-    std_ = np.std(stacked, axis=0).astype(np.float32)
+    mode = str(mode).lower()
+    if mode == "robust":
+        median_ = np.median(stacked, axis=0).astype(np.float32)
+        q1 = np.percentile(stacked, 25, axis=0).astype(np.float32)
+        q3 = np.percentile(stacked, 75, axis=0).astype(np.float32)
+        scale_ = np.clip(q3 - q1, 1e-6, None).astype(np.float32)
+        mean_ = median_
+        std_ = scale_
+    else:
+        mean_ = np.mean(stacked, axis=0).astype(np.float32)
+        std_ = np.std(stacked, axis=0).astype(np.float32)
     return StandardScaler(mean_=mean_, std_=std_), detected_cols
 
 
@@ -367,6 +387,10 @@ def prepare_datasets(
     seed: int = 42,
     sensor_dim: int = 2,
     max_windows_per_bearing: int = 20000,
+    scaler_mode: str = "standard",
+    valid_bearing_ids: Sequence[str] | None = None,
+    late_stage_threshold: float = 0.2,
+    late_stage_oversample_factor: float = 1.0,
 ) -> PreparedData:
     """Prepare train/valid/test datasets from PHM2012 raw files.
 
@@ -391,13 +415,14 @@ def prepare_datasets(
         runs=runs,
         valid_ratio=valid_ratio,
         seed=seed,
+        valid_bearing_ids=valid_bearing_ids,
     )
 
     print("Train runs:", [r.bearing_id for r in train_runs])
     print("Valid runs:", [r.bearing_id for r in valid_runs])
     print("Test runs:", [r.bearing_id for r in test_runs])
 
-    scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim)
+    scaler, detected_cols = fit_scaler(train_runs, sensor_dim=sensor_dim, mode=scaler_mode)
     target_scale = compute_target_scale(train_runs, max_rul=max_rul)
 
     x_train, y_train, id_train = _runs_to_samples(
@@ -437,6 +462,18 @@ def prepare_datasets(
     if x_train.shape[0] == 0:
         raise RuntimeError("No training windows were generated. Check dataset structure.")
 
+    if late_stage_oversample_factor > 1.0:
+        late_mask = y_train <= float(late_stage_threshold)
+        late_idx = np.where(late_mask)[0]
+        if late_idx.size > 0:
+            rep = int(round(float(late_stage_oversample_factor) - 1.0))
+            rep = max(rep, 0)
+            if rep > 0:
+                add_idx = np.tile(late_idx, rep)
+                x_train = np.concatenate([x_train, x_train[add_idx]], axis=0)
+                y_train = np.concatenate([y_train, y_train[add_idx]], axis=0)
+                id_train = id_train + [id_train[i] for i in add_idx.tolist()]
+
     # Guard against silent shape drift between splits.
     if x_valid.size and x_valid.shape[-1] != x_train.shape[-1]:
         raise RuntimeError("Validation sensor dimension mismatch with training set.")
@@ -447,6 +484,32 @@ def prepare_datasets(
     valid_ds = PHM2012RULDataset(x_valid, y_valid, id_valid) if len(x_valid) else train_ds
     test_ds = PHM2012RULDataset(x_test, y_test, id_test) if len(x_test) else valid_ds
 
+    def _split_diag(ids: List[str], y: np.ndarray) -> Dict[str, object]:
+        unique, counts = np.unique(np.asarray(ids, dtype=object), return_counts=True) if ids else (np.array([]), np.array([]))
+        bins = np.array([0.0, 0.2, 0.4, 0.6, 0.8, np.inf], dtype=np.float32)
+        hist, _ = np.histogram(y, bins=bins) if y.size else (np.zeros(5, dtype=np.int64), bins)
+        return {
+            "windows_per_bearing": {str(u): int(c) for u, c in zip(unique.tolist(), counts.tolist())},
+            "rul_bin_counts": {
+                "[0.0,0.2]": int(hist[0]),
+                "(0.2,0.4]": int(hist[1]),
+                "(0.4,0.6]": int(hist[2]),
+                "(0.6,0.8]": int(hist[3]),
+                "(0.8,1.0+]": int(hist[4]),
+            },
+        }
+
+    split_diagnostics = {
+        "window_size": int(window_size),
+        "stride": int(stride),
+        "scaler_mode": str(scaler_mode),
+        "late_stage_threshold": float(late_stage_threshold),
+        "late_stage_oversample_factor": float(late_stage_oversample_factor),
+        "train": _split_diag(id_train, y_train),
+        "valid": _split_diag(id_valid, y_valid),
+        "test": _split_diag(id_test, y_test),
+    }
+
     return PreparedData(
         train_dataset=train_ds,
         valid_dataset=valid_ds,
@@ -455,6 +518,7 @@ def prepare_datasets(
         feature_dim=x_train.shape[-1],
         detected_sensor_columns=detected_cols,
         target_scale=target_scale,
+        split_diagnostics=split_diagnostics,
     )
 
 
@@ -475,4 +539,5 @@ def summarize_dataset(prepared: PreparedData) -> Dict[str, object]:
         "num_sensors": prepared.feature_dim,
         "detected_sensor_columns": prepared.detected_sensor_columns,
         "target_scale": prepared.target_scale,
+        "split_diagnostics": prepared.split_diagnostics,
     }

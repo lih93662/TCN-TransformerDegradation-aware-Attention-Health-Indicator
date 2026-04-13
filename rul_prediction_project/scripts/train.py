@@ -161,6 +161,10 @@ def run_single_seed(cfg: Dict, seed: int) -> Dict[str, float | int | str]:
         seed=seed,
         sensor_dim=int(data_cfg.get("sensor_dim", 2)),
         max_windows_per_bearing=int(data_cfg.get("max_windows_per_bearing", 20000)),
+        scaler_mode=str(data_cfg.get("scaler_mode", "standard")),
+        valid_bearing_ids=data_cfg.get("valid_bearing_ids"),
+        late_stage_threshold=float(data_cfg.get("late_stage_threshold", 0.2)),
+        late_stage_oversample_factor=float(data_cfg.get("late_stage_oversample_factor", 1.0)),
     )
     stats = summarize_dataset(prepared)
     logger.info("Dataset summary: %s", stats)
