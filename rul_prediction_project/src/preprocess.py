@@ -800,6 +800,9 @@ def prepare_datasets(
         "valid": _split_diag(id_valid, y_valid),
         "test": _split_diag(id_test, y_test),
     }
+    print("Train RUL bins before balancing:", split_diagnostics["rul_bin_counts_before_balance"]["train"])
+    print("Train RUL bins after balancing:", split_diagnostics["train"]["rul_bin_counts"])
+    print("Valid RUL bins:", split_diagnostics["valid"]["rul_bin_counts"])
     print("Split diagnostics:", split_diagnostics)
 
     return PreparedData(
