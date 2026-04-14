@@ -6,8 +6,8 @@ experiment:
 
 data:
   dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
-  window_size: 64
-  stride: 2
+  window_size: 128
+  stride: 4
   max_rul: 0
   valid_ratio: 0.33
   valid_bearing_ids: []  # optional explicit validation run ids
@@ -54,7 +54,7 @@ model:
   output_activation: "identity"
 
 train:
-  lr: 0.0001
+  lr: 0.00003
   batch_size: 32
   epochs: 80
   num_workers: 0
@@ -74,11 +74,11 @@ train:
   bias_regularization_weight: 0.0
   std_regularization_weight: 0.05
   correlation_regularization_weight: 0.05
-  hi_supervision_weight: 0.01
+  hi_supervision_weight: 0.03
   hi_rank_weight: 0.0
   hi_variance_weight: 0.03
   hi_variance_floor: 0.08
-  hi_smoothness_weight: 0.01
+  hi_smoothness_weight: 0.02
 
 evaluation:
   attention_num_samples: 3
