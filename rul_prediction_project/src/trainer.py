@@ -47,6 +47,7 @@ class TrainerConfig:
     hi_variance_weight: float = 0.03
     hi_variance_floor: float = 0.08
     hi_smoothness_weight: float = 0.01
+    hi_target_mode: str = "degradation"
     collapse_std_threshold: float = 1e-4
 
 
@@ -187,10 +188,11 @@ class Trainer:
                 hi_rank = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
                 hi_smoothness = torch.tensor(0.0, device=self.device)
+                hi_target = 1.0 - y if str(self.config.hi_target_mode).lower() == "degradation" else y
                 if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
-                    hi_sup = torch.nn.functional.mse_loss(out["hi"], y)
+                    hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
                 if self.config.hi_rank_weight > 0 and out.get("hi") is not None:
-                    y_flat = y.view(-1)
+                    y_flat = hi_target.view(-1)
                     hi_flat = out["hi"].view(-1)
                     pair_idx = torch.randperm(y_flat.numel(), device=self.device)
                     margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
@@ -437,10 +439,14 @@ class Trainer:
                 "true_max": float("nan"),
             }
         hi_true_corr = float(np.corrcoef(hi, true)[0, 1]) if len(hi) > 1 else float("nan")
+        hi_true_degradation_corr = float(np.corrcoef(hi, 1.0 - true)[0, 1]) if len(hi) > 1 else float("nan")
         hi_pred_corr = float(np.corrcoef(hi, pred)[0, 1]) if len(hi) > 1 else float("nan")
         regression_stats["hi_mean"] = float(np.mean(hi)) if len(hi) else float("nan")
         regression_stats["hi_std"] = float(np.std(hi)) if len(hi) else float("nan")
         regression_stats["hi_true_corr"] = hi_true_corr if np.isfinite(hi_true_corr) else float("nan")
+        regression_stats["hi_true_degradation_corr"] = (
+            hi_true_degradation_corr if np.isfinite(hi_true_degradation_corr) else float("nan")
+        )
         regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
 
         if len(pred):
@@ -471,7 +477,7 @@ class Trainer:
             (
                 "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
                 "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | "
-                "hi-true corr %.4f | hi-pred corr %.4f"
+                "hi-true(RUL) corr %.4f | hi-true(degradation) corr %.4f | hi-pred corr %.4f"
             ),
             phase.title(),
             epoch,
@@ -485,6 +491,7 @@ class Trainer:
             regression_stats["hi_mean"],
             regression_stats["hi_std"],
             regression_stats["hi_true_corr"],
+            regression_stats["hi_true_degradation_corr"],
             regression_stats["hi_pred_corr"],
         )
         return regression_stats

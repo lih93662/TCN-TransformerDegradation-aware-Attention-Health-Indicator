@@ -245,8 +245,10 @@ def main() -> None:
         "hi_max": float(np.max(result.hi)),
     }
     corr = np.corrcoef(y_true, result.hi)[0, 1] if len(y_true) > 1 else np.nan
+    corr_deg = np.corrcoef(1.0 - y_true, result.hi)[0, 1] if len(y_true) > 1 else np.nan
     corr_pred = np.corrcoef(y_pred, result.hi)[0, 1] if len(y_pred) > 1 else np.nan
     hi_summary["corr_hi_true_rul"] = float(corr) if np.isfinite(corr) else float("nan")
+    hi_summary["corr_hi_true_degradation"] = float(corr_deg) if np.isfinite(corr_deg) else float("nan")
     hi_summary["corr_hi_pred_rul"] = float(corr_pred) if np.isfinite(corr_pred) else float("nan")
 
     scatter_rows = []

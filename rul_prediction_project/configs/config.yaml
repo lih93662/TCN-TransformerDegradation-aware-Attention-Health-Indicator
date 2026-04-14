@@ -63,7 +63,7 @@ train:
   early_stopping_min_delta: 0.0005
   grad_clip_norm: 1.0
   scheduler_factor: 0.5
-  scheduler_patience: 5
+  scheduler_patience: 7
   weight_decay: 0.0
   loss_name: "mse_mae"
   use_mae_term: true
@@ -72,13 +72,14 @@ train:
   loss_mae_weight: 0.2
   huber_delta: 0.1
   bias_regularization_weight: 0.0
-  std_regularization_weight: 0.05
-  correlation_regularization_weight: 0.05
-  hi_supervision_weight: 0.03
+  std_regularization_weight: 0.02
+  correlation_regularization_weight: 0.02
+  hi_supervision_weight: 0.02
   hi_rank_weight: 0.0
   hi_variance_weight: 0.03
   hi_variance_floor: 0.08
-  hi_smoothness_weight: 0.02
+  hi_smoothness_weight: 0.015
+  hi_target_mode: "degradation"  # degradation (recommended) | health
 
 evaluation:
   attention_num_samples: 3
