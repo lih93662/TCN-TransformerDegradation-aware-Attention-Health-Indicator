@@ -198,9 +198,9 @@ class Trainer:
                     margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
                     hi_rank = torch.nn.functional.softplus(-margin).mean()
                 if self.config.hi_variance_weight > 0 and out.get("hi") is not None:
-                    hi_for_var = out.get("hi_logit")
-                    if hi_for_var is None:
-                        hi_for_var = out["hi"]
+                    # Penalize low variance directly on bounded HI output to
+                    # prevent near-constant HI collapse.
+                    hi_for_var = out["hi"]
                     batch_ids = list(batch.get("id", []))
                     penalties = []
                     if batch_ids:
