@@ -47,7 +47,7 @@ class TrainerConfig:
     hi_variance_weight: float = 0.03
     hi_variance_floor: float = 0.08
     hi_smoothness_weight: float = 0.01
-    hi_target_mode: str = "degradation"
+    hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
 
 
@@ -84,6 +84,11 @@ class Trainer:
             correlation_regularization_weight=config.correlation_regularization_weight,
         )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+        if str(config.hi_target_mode).lower() != "health":
+            raise ValueError(
+                "HI semantic convention is fixed to health mode (higher HI => larger RUL). "
+                "Set train.hi_target_mode='health'."
+            )
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="min",
@@ -188,7 +193,8 @@ class Trainer:
                 hi_rank = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
                 hi_smoothness = torch.tensor(0.0, device=self.device)
-                hi_target = 1.0 - y if str(self.config.hi_target_mode).lower() == "degradation" else y
+                # Fixed project convention: HI is a health indicator aligned with RUL.
+                hi_target = y
                 if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
                 if self.config.hi_rank_weight > 0 and out.get("hi") is not None:

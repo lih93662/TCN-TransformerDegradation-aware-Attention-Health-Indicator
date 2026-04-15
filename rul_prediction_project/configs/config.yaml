@@ -79,7 +79,7 @@ train:
   hi_variance_weight: 0.2
   hi_variance_floor: 0.03
   hi_smoothness_weight: 0.001
-  hi_target_mode: "health"  # health (higher means healthier / larger RUL) | degradation
+  hi_target_mode: "health"  # fixed convention: higher HI means healthier / larger RUL
 
 evaluation:
   attention_num_samples: 3
