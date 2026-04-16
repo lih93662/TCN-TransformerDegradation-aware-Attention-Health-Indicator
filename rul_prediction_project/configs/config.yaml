@@ -39,6 +39,7 @@ model:
   transformer_ffn_dim: 256
   dropout: 0.3
   use_hi: true
+  use_fixed_hi: true  # fixed HI = normalized RUL target (non-learned)
   hi_input_source: "tcn"  # stats | tcn | hybrid
   hi_output_temperature: 1.2
   use_attention: true
@@ -74,11 +75,11 @@ train:
   bias_regularization_weight: 0.0
   std_regularization_weight: 0.02
   correlation_regularization_weight: 0.02
-  hi_supervision_weight: 0.005
+  hi_supervision_weight: 0.0
   hi_rank_weight: 0.0
-  hi_variance_weight: 0.2
+  hi_variance_weight: 0.0
   hi_variance_floor: 0.03
-  hi_smoothness_weight: 0.001
+  hi_smoothness_weight: 0.0
   hi_target_mode: "health"  # fixed convention: higher HI means healthier / larger RUL
 
 evaluation:

@@ -76,6 +76,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         dropout=float(model_cfg_raw["dropout"]),
         backbone_variant=str(model_cfg_raw.get("backbone_variant", "tcn_transformer")),
         use_hi=bool(model_cfg_raw.get("use_hi", True)),
+        use_fixed_hi=bool(model_cfg_raw.get("use_fixed_hi", False)),
         hi_input_source=str(model_cfg_raw.get("hi_input_source", "tcn")),
         hi_output_temperature=float(model_cfg_raw.get("hi_output_temperature", 1.2)),
         use_attention=bool(model_cfg_raw.get("use_attention", True)),

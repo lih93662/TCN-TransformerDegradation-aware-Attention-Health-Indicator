@@ -127,6 +127,7 @@ Data-side controls live in `configs/config.yaml`:
 - `train_balance_seed`: balancing seed (falls back to experiment seed).
 - Default `configs/config.yaml` now enables balanced train-bin sampling with `hybrid + median` and uses 2 validation bearings with a 4-bin minimum coverage target.
 - `train.hi_target_mode`: fixed to `health`; higher HI indicates healthier state (larger RUL).
+- `model.use_fixed_hi`: when `true`, HI is deterministic (`HI = normalized RUL`) and HI auxiliary losses are disabled.
 
 Ready-to-run presets for data comparisons:
 

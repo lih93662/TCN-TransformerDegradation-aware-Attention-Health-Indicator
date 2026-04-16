@@ -28,6 +28,7 @@ class ModelConfig:
     dropout: float = 0.1
     backbone_variant: str = "tcn_transformer"
     use_hi: bool = True
+    use_fixed_hi: bool = False
     hi_input_source: str = "tcn"
     hi_output_temperature: float = 1.2
     use_attention: bool = True
@@ -108,7 +109,7 @@ class HybridRULModel(nn.Module):
             activation=cfg.output_activation,
         )
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, fixed_hi: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
         # Stage 1/2 backbone variants
         if self.backbone_variant == "tcn_only":
             tcn_seq, tcn_pool = self.tcn(x)
@@ -135,7 +136,16 @@ class HybridRULModel(nn.Module):
             tr_seq, tr_pool = self.transformer(tcn_seq)
 
         # HI module from raw input
-        if self.use_hi and self.hi is not None:
+        if bool(self.cfg.use_fixed_hi):
+            if fixed_hi is None:
+                raise ValueError("Model configured with use_fixed_hi=True requires fixed_hi input.")
+            hi_score = torch.clamp(fixed_hi, 0.0, 1.0).view(-1, 1)
+            hi_health = hi_score
+            hi_logit = torch.logit(torch.clamp(hi_score, 1e-4, 1.0 - 1e-4))
+            hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
+            hi_temporal = None
+            hi_temporal_logit = None
+        elif self.use_hi and self.hi is not None:
             hi_health, hi_stats, hi_temporal, hi_temporal_logit, hi_logit = self.hi(x, tcn_seq=tcn_seq)
             # Project-level default: expose HI as health score where larger values
             # indicate healthier state / larger remaining life.

@@ -46,7 +46,8 @@ def evaluate_model(
         for batch in loader:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            out = model(x)
+            fixed_hi_mode = bool(getattr(getattr(model, "cfg", None), "use_fixed_hi", False))
+            out = model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
             p = out["pred"]
             h = out["hi"]
 

@@ -183,11 +183,12 @@ class Trainer:
             for batch_idx, batch in enumerate(pbar, start=1):
                 x = batch["x"].to(self.device)
                 y = batch["y"].to(self.device)
+                fixed_hi_mode = bool(getattr(getattr(self.model, "cfg", None), "use_fixed_hi", False))
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                out = self.model(x)
+                out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
                 loss_out = self.criterion(out["pred"], y)
                 hi_sup = torch.tensor(0.0, device=self.device)
                 hi_rank = torch.tensor(0.0, device=self.device)
@@ -195,15 +196,15 @@ class Trainer:
                 hi_smoothness = torch.tensor(0.0, device=self.device)
                 # Fixed project convention: HI is a health indicator aligned with RUL.
                 hi_target = y
-                if self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
+                if (not fixed_hi_mode) and self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
-                if self.config.hi_rank_weight > 0 and out.get("hi") is not None:
+                if (not fixed_hi_mode) and self.config.hi_rank_weight > 0 and out.get("hi") is not None:
                     y_flat = hi_target.view(-1)
                     hi_flat = out["hi"].view(-1)
                     pair_idx = torch.randperm(y_flat.numel(), device=self.device)
                     margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
                     hi_rank = torch.nn.functional.softplus(-margin).mean()
-                if self.config.hi_variance_weight > 0 and out.get("hi") is not None:
+                if (not fixed_hi_mode) and self.config.hi_variance_weight > 0 and out.get("hi") is not None:
                     # Penalize low variance directly on bounded HI output to
                     # prevent near-constant HI collapse.
                     hi_for_var = out["hi"]
@@ -227,7 +228,7 @@ class Trainer:
                         hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")
-                if self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
+                if (not fixed_hi_mode) and self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
                     smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
                     hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
                     hi_smoothness = hi_delta.pow(2).mean()
@@ -383,7 +384,8 @@ class Trainer:
             for batch in loader:
                 x = batch["x"].to(self.device)
                 y = batch["y"].to(self.device)
-                out = self.model(x)
+                fixed_hi_mode = bool(getattr(getattr(self.model, "cfg", None), "use_fixed_hi", False))
+                out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
                 preds.append(out["pred"].detach().cpu().numpy().reshape(-1))
                 trues.append(y.detach().cpu().numpy().reshape(-1))
                 his.append(out["hi"].detach().cpu().numpy().reshape(-1))
