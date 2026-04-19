@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from .checkpoint_compat import load_model_state_strict
 from .evaluator import evaluate_model
 from .loss import RawRegressionLoss, compute_regression_metrics
 from .utils import save_csv_rows, save_json
@@ -29,6 +30,8 @@ class TrainerConfig:
     epochs: int = 50
     num_workers: int = 0
     early_stopping_patience: int = 5
+    early_stopping_min_epochs: int = 10
+    early_stopping_min_delta: float = 0.0
     grad_clip_norm: float = 1.0
     scheduler_factor: float = 0.5
     scheduler_patience: int = 3
@@ -38,6 +41,15 @@ class TrainerConfig:
     loss_mae_weight: float = 0.3
     huber_delta: float = 0.1
     bias_regularization_weight: float = 0.0
+    std_regularization_weight: float = 0.0
+    correlation_regularization_weight: float = 0.0
+    hi_supervision_weight: float = 0.0
+    hi_rank_weight: float = 0.0
+    hi_variance_weight: float = 0.03
+    hi_variance_floor: float = 0.08
+    hi_smoothness_weight: float = 0.01
+    residual_regularization_weight: float = 0.0
+    hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
 
 
@@ -70,8 +82,15 @@ class Trainer:
             mse_weight=config.loss_mse_weight,
             mae_weight=config.loss_mae_weight,
             bias_regularization_weight=config.bias_regularization_weight,
+            std_regularization_weight=config.std_regularization_weight,
+            correlation_regularization_weight=config.correlation_regularization_weight,
         )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+        if str(config.hi_target_mode).lower() != "health":
+            raise ValueError(
+                "HI semantic convention is fixed to health mode (higher HI => larger RUL). "
+                "Set train.hi_target_mode='health'."
+            )
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="min",
@@ -133,6 +152,14 @@ class Trainer:
             "mse": 0.0,
             "bias": 0.0,
             "bias_penalty": 0.0,
+            "std_penalty": 0.0,
+            "corr_penalty": 0.0,
+            "corr_value": 0.0,
+            "hi_supervision": 0.0,
+            "hi_rank": 0.0,
+            "hi_var_penalty": 0.0,
+            "hi_smoothness": 0.0,
+            "residual_penalty": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -140,8 +167,17 @@ class Trainer:
         attn_max_sum = 0.0
         attn_mean_sum = 0.0
         attn_std_sum = 0.0
+        attn_cond_hi_std_sum = 0.0
+        attn_head_bias_std_sum = 0.0
+        attn_degradation_bias_std_sum = 0.0
+        attn_delta_sum = 0.0
         attn_batches = 0
         attn_map_sum: np.ndarray | None = None
+        hi_mean_sum = 0.0
+        hi_std_sum = 0.0
+        hi_min_sum = 0.0
+        hi_max_sum = 0.0
+        hi_batches = 0
 
         pbar = tqdm(loader, desc=f"{mode.title()} Epoch {epoch:03d}/{self.config.epochs:03d}", leave=False)
         grad_context = torch.enable_grad() if train else torch.no_grad()
@@ -150,15 +186,74 @@ class Trainer:
             for batch_idx, batch in enumerate(pbar, start=1):
                 x = batch["x"].to(self.device)
                 y = batch["y"].to(self.device)
+                fixed_hi_mode = bool(getattr(getattr(self.model, "cfg", None), "use_fixed_hi", False))
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                out = self.model(x)
+                out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
                 loss_out = self.criterion(out["pred"], y)
+                hi_sup = torch.tensor(0.0, device=self.device)
+                hi_rank = torch.tensor(0.0, device=self.device)
+                hi_var_pen = torch.tensor(0.0, device=self.device)
+                hi_smoothness = torch.tensor(0.0, device=self.device)
+                # Fixed project convention: HI is a health indicator aligned with RUL.
+                hi_target = y
+                if (not fixed_hi_mode) and self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
+                    hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
+                if (not fixed_hi_mode) and self.config.hi_rank_weight > 0 and out.get("hi") is not None:
+                    y_flat = hi_target.view(-1)
+                    hi_flat = out["hi"].view(-1)
+                    pair_idx = torch.randperm(y_flat.numel(), device=self.device)
+                    margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
+                    hi_rank = torch.nn.functional.softplus(-margin).mean()
+                if (not fixed_hi_mode) and self.config.hi_variance_weight > 0 and out.get("hi") is not None:
+                    # Penalize low variance directly on bounded HI output to
+                    # prevent near-constant HI collapse.
+                    hi_for_var = out["hi"]
+                    batch_ids = list(batch.get("id", []))
+                    penalties = []
+                    if batch_ids:
+                        unique_ids = sorted(set(batch_ids))
+                        for uid in unique_ids:
+                            idx = [i for i, bid in enumerate(batch_ids) if bid == uid]
+                            if len(idx) < 2:
+                                continue
+                            idx_t = torch.as_tensor(idx, device=self.device, dtype=torch.long)
+                            hi_std_i = torch.std(hi_for_var.index_select(0, idx_t).view(-1), unbiased=False)
+                            penalties.append(
+                                torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std_i).pow(2)
+                            )
+                    if penalties:
+                        hi_var_pen = torch.stack(penalties).mean()
+                    else:
+                        hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
+                        hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+                hi_temporal = out.get("hi_temporal")
+                hi_temporal_logit = out.get("hi_temporal_logit")
+                residual_penalty = torch.tensor(0.0, device=self.device)
+                if (
+                    str(getattr(self.model, "rul_head_mode", "plain")).lower() == "hi_guided_residual"
+                    and self.config.residual_regularization_weight > 0
+                    and out.get("residual_component") is not None
+                ):
+                    residual_penalty = out["residual_component"].abs().mean()
+                if (not fixed_hi_mode) and self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
+                    smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
+                    hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
+                    hi_smoothness = hi_delta.pow(2).mean()
+
+                total_loss = (
+                    loss_out.total
+                    + self.config.hi_supervision_weight * hi_sup
+                    + self.config.hi_rank_weight * hi_rank
+                    + self.config.hi_variance_weight * hi_var_pen
+                    + self.config.hi_smoothness_weight * hi_smoothness
+                    + self.config.residual_regularization_weight * residual_penalty
+                )
 
                 if train:
-                    loss_out.total.backward()
+                    total_loss.backward()
                     grad_norm = float("nan")
                     if self.config.grad_clip_norm and self.config.grad_clip_norm > 0:
                         grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm).item())
@@ -166,14 +261,31 @@ class Trainer:
                 else:
                     grad_norm = float("nan")
 
-                totals["loss"] += float(loss_out.total.item())
+                totals["loss"] += float(total_loss.item())
                 totals["rmse"] += float(loss_out.rmse.item())
                 totals["mae"] += float(loss_out.mae.item())
                 totals["mse"] += float(loss_out.mse.item())
                 totals["bias"] += float(loss_out.mean_bias.item())
                 totals["bias_penalty"] += float(loss_out.bias_penalty.item())
+                totals["std_penalty"] += float(loss_out.std_penalty.item())
+                totals["corr_penalty"] += float(loss_out.corr_penalty.item())
+                totals["corr_value"] += float(loss_out.corr_value.item())
+                totals["hi_supervision"] += float(hi_sup.item())
+                totals["hi_rank"] += float(hi_rank.item())
+                totals["hi_var_penalty"] += float(hi_var_pen.item())
+                totals["hi_smoothness"] += float(hi_smoothness.item())
+                totals["residual_penalty"] += float(residual_penalty.item())
+
+                hi = out.get("hi")
+                if hi is not None:
+                    hi_mean_sum += float(hi.mean().item())
+                    hi_std_sum += float(hi.std().item())
+                    hi_min_sum += float(hi.min().item())
+                    hi_max_sum += float(hi.max().item())
+                    hi_batches += 1
 
                 attn = out.get("attn_map")
+                attn_debug = out.get("attention_debug")
                 if attn is not None:
                     attn_min = float(attn.min().item())
                     attn_max = float(attn.max().item())
@@ -183,6 +295,11 @@ class Trainer:
                     attn_max_sum += attn_max
                     attn_mean_sum += attn_mean
                     attn_std_sum += attn_std
+                    if attn_debug is not None:
+                        attn_cond_hi_std_sum += float(attn_debug["hi_cond_std"].item())
+                        attn_head_bias_std_sum += float(attn_debug["head_bias_std"].item())
+                        attn_degradation_bias_std_sum += float(attn_debug["degradation_bias_std"].item())
+                        attn_delta_sum += float(attn_debug["attn_delta_l1"].item())
                     attn_batches += 1
                     attn_2d = attn.detach().mean(dim=(0, 1)).cpu().numpy().astype(np.float32)
                     attn_map_sum = attn_2d if attn_map_sum is None else (attn_map_sum + attn_2d)
@@ -198,12 +315,19 @@ class Trainer:
                         "epoch": epoch,
                         "phase": mode,
                         "batch": batch_idx,
-                        "total_loss": float(loss_out.total.item()),
+                        "total_loss": float(total_loss.item()),
                         "rmse": float(loss_out.rmse.item()),
                         "mae": float(loss_out.mae.item()),
                         "mse": float(loss_out.mse.item()),
                         "mean_bias": float(loss_out.mean_bias.item()),
                         "bias_penalty": float(loss_out.bias_penalty.item()),
+                        "std_penalty": float(loss_out.std_penalty.item()),
+                        "corr_penalty": float(loss_out.corr_penalty.item()),
+                        "corr_value": float(loss_out.corr_value.item()),
+                        "hi_supervision_loss": float(hi_sup.item()),
+                        "hi_rank_loss": float(hi_rank.item()),
+                        "hi_variance_penalty": float(hi_var_pen.item()),
+                        "hi_smoothness_loss": float(hi_smoothness.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -215,7 +339,7 @@ class Trainer:
 
                 pbar.set_postfix(
                     {
-                        "loss": f"{loss_out.total.item():.4f}",
+                        "loss": f"{total_loss.item():.4f}",
                         "rmse": f"{loss_out.rmse.item():.4f}",
                         "bias": f"{loss_out.mean_bias.item():+.4f}",
                     }
@@ -229,6 +353,17 @@ class Trainer:
             f"{mode}_mse": totals["mse"] / n,
             f"{mode}_mean_bias": totals["bias"] / n,
             f"{mode}_bias_penalty": totals["bias_penalty"] / n,
+            f"{mode}_std_penalty": totals["std_penalty"] / n,
+            f"{mode}_corr_penalty": totals["corr_penalty"] / n,
+            f"{mode}_corr_value": totals["corr_value"] / n,
+            f"{mode}_hi_supervision": totals["hi_supervision"] / n,
+            f"{mode}_hi_rank": totals["hi_rank"] / n,
+            f"{mode}_hi_var_penalty": totals["hi_var_penalty"] / n,
+            f"{mode}_hi_smoothness": totals["hi_smoothness"] / n,
+            f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
+            f"{mode}_hi_std": hi_std_sum / max(1, hi_batches),
+            f"{mode}_hi_min": hi_min_sum / max(1, hi_batches),
+            f"{mode}_hi_max": hi_max_sum / max(1, hi_batches),
         }
 
         attn_stats = {
@@ -237,6 +372,10 @@ class Trainer:
             "attn_max": attn_max_sum / max(1, attn_batches),
             "attn_mean": attn_mean_sum / max(1, attn_batches),
             "attn_std": attn_std_sum / max(1, attn_batches),
+            "cond_hi_std": attn_cond_hi_std_sum / max(1, attn_batches),
+            "head_bias_std": attn_head_bias_std_sum / max(1, attn_batches),
+            "degradation_bias_std": attn_degradation_bias_std_sum / max(1, attn_batches),
+            "attn_delta_l1": attn_delta_sum / max(1, attn_batches),
             "num_batches_with_attention": float(attn_batches),
         }
 
@@ -246,9 +385,10 @@ class Trainer:
 
         return metrics, batch_rows, attn_stats, attn_avg
 
-    def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
         preds: List[np.ndarray] = []
         trues: List[np.ndarray] = []
+        his: List[np.ndarray] = []
         ids: List[str] = []
 
         self.model.eval()
@@ -256,25 +396,33 @@ class Trainer:
             for batch in loader:
                 x = batch["x"].to(self.device)
                 y = batch["y"].to(self.device)
-                out = self.model(x)
+                fixed_hi_mode = bool(getattr(getattr(self.model, "cfg", None), "use_fixed_hi", False))
+                out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
                 preds.append(out["pred"].detach().cpu().numpy().reshape(-1))
                 trues.append(y.detach().cpu().numpy().reshape(-1))
+                his.append(out["hi"].detach().cpu().numpy().reshape(-1))
                 ids.extend(list(batch["id"]))
 
         if not preds:
-            return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32), []
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                [],
+            )
 
         return (
             np.concatenate(preds).astype(np.float32),
             np.concatenate(trues).astype(np.float32),
+            np.concatenate(his).astype(np.float32),
             ids,
         )
 
     def _save_prediction_debug(self, epoch: int, phase: str, loader: DataLoader) -> Dict[str, float]:
-        pred, true, ids = self._collect_predictions(loader)
+        pred, true, hi, ids = self._collect_predictions(loader)
         csv_path = self.pred_dir / f"epoch_{epoch:03d}_{phase}.csv"
         rows = []
-        for idx, (bearing_id, y_true, y_pred) in enumerate(zip(ids, true, pred)):
+        for idx, (bearing_id, y_true, y_pred, hi_i) in enumerate(zip(ids, true, pred, hi)):
             rows.append(
                 {
                     "epoch": epoch,
@@ -284,6 +432,7 @@ class Trainer:
                     "true_rul": float(y_true),
                     "pred_rul": float(y_pred),
                     "error": float(y_pred - y_true),
+                    "hi": float(hi_i),
                 }
             )
         save_csv_rows(csv_path, rows)
@@ -309,6 +458,16 @@ class Trainer:
                 "true_min": float("nan"),
                 "true_max": float("nan"),
             }
+        hi_true_corr = float(np.corrcoef(hi, true)[0, 1]) if len(hi) > 1 else float("nan")
+        hi_true_degradation_corr = float(np.corrcoef(hi, 1.0 - true)[0, 1]) if len(hi) > 1 else float("nan")
+        hi_pred_corr = float(np.corrcoef(hi, pred)[0, 1]) if len(hi) > 1 else float("nan")
+        regression_stats["hi_mean"] = float(np.mean(hi)) if len(hi) else float("nan")
+        regression_stats["hi_std"] = float(np.std(hi)) if len(hi) else float("nan")
+        regression_stats["hi_true_corr"] = hi_true_corr if np.isfinite(hi_true_corr) else float("nan")
+        regression_stats["hi_true_degradation_corr"] = (
+            hi_true_degradation_corr if np.isfinite(hi_true_degradation_corr) else float("nan")
+        )
+        regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -337,7 +496,8 @@ class Trainer:
         self.logger.info(
             (
                 "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
-                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f"
+                "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | "
+                "hi-true(RUL) corr %.4f | hi-true(degradation) corr %.4f | hi-pred corr %.4f"
             ),
             phase.title(),
             epoch,
@@ -348,6 +508,11 @@ class Trainer:
             regression_stats["pred_std"],
             regression_stats["true_mean"],
             regression_stats["true_std"],
+            regression_stats["hi_mean"],
+            regression_stats["hi_std"],
+            regression_stats["hi_true_corr"],
+            regression_stats["hi_true_degradation_corr"],
+            regression_stats["hi_pred_corr"],
         )
         return regression_stats
 
@@ -405,8 +570,10 @@ class Trainer:
 
             self.logger.info(
                 (
-                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f | "
-                    "valid rmse %.4f mae %.4f bias %+.4f"
+                    "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
+                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f | "
+                    "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
+                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -415,14 +582,40 @@ class Trainer:
                 tr["train_rmse"],
                 tr["train_mae"],
                 tr["train_mean_bias"],
+                tr["train_std_penalty"],
+                tr["train_corr_value"],
+                tr["train_hi_supervision"],
+                tr["train_hi_rank"],
+                tr["train_hi_var_penalty"],
+                tr["train_hi_smoothness"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
+                va["valid_std_penalty"],
+                va["valid_corr_value"],
+                va["valid_hi_supervision"],
+                va["valid_hi_rank"],
+                va["valid_hi_var_penalty"],
+                va["valid_hi_smoothness"],
+            )
+            self.logger.info(
+                "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",
+                epoch,
+                tr["train_hi_mean"],
+                tr["train_hi_std"],
+                tr["train_hi_min"],
+                tr["train_hi_max"],
+                va["valid_hi_mean"],
+                va["valid_hi_std"],
+                va["valid_hi_min"],
+                va["valid_hi_max"],
             )
             self.logger.info(
                 (
-                    "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f | "
-                    "valid min/max %.5f/%.5f mean/std %.5f/%.5f"
+                    "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f "
+                    "cond_hi_std %.5f head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f | "
+                    "valid min/max %.5f/%.5f mean/std %.5f/%.5f cond_hi_std %.5f "
+                    "head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -430,14 +623,23 @@ class Trainer:
                 tr_attn_stats["attn_max"],
                 tr_attn_stats["attn_mean"],
                 tr_attn_stats["attn_std"],
+                tr_attn_stats["cond_hi_std"],
+                tr_attn_stats["head_bias_std"],
+                tr_attn_stats["degradation_bias_std"],
+                tr_attn_stats["attn_delta_l1"],
                 va_attn_stats["attn_min"],
                 va_attn_stats["attn_max"],
                 va_attn_stats["attn_mean"],
                 va_attn_stats["attn_std"],
+                va_attn_stats["cond_hi_std"],
+                va_attn_stats["head_bias_std"],
+                va_attn_stats["degradation_bias_std"],
+                va_attn_stats["attn_delta_l1"],
             )
 
             improved_total = va["valid_total"] < self.best_val_total
-            improved_rmse = va["valid_rmse"] < self.best_val_rmse
+            min_delta = max(0.0, float(self.config.early_stopping_min_delta))
+            improved_rmse = va["valid_rmse"] < (self.best_val_rmse - min_delta)
             if improved_total:
                 self.best_val_total = va["valid_total"]
 
@@ -459,6 +661,9 @@ class Trainer:
                     self.config.early_stopping_patience,
                 )
 
+            if epoch < int(self.config.early_stopping_min_epochs):
+                continue
+
             if self.no_improve_epochs >= self.config.early_stopping_patience:
                 self.logger.info(
                     "Early stopping triggered at epoch %03d (best epoch %03d, best valid_rmse=%.4f)",
@@ -472,8 +677,11 @@ class Trainer:
 
     def evaluate(self, test_dataset) -> Dict[str, float]:
         if self.checkpoint_path.exists():
-            payload = torch.load(self.checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(payload["model_state"])
+            try:
+                payload = torch.load(self.checkpoint_path, map_location=self.device, weights_only=True)
+            except TypeError:
+                payload = torch.load(self.checkpoint_path, map_location=self.device)
+            load_model_state_strict(self.model, payload)
             self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 
         test_loader = self._make_loader(test_dataset, shuffle=False)

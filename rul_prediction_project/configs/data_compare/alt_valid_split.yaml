@@ -1,0 +1,9 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: data_alt_valid
+
+data:
+  balance_train_rul_bins: false
+  valid_split_variant: alt_bearing1_1
+

@@ -1,0 +1,13 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: data_balanced_train
+
+data:
+  balance_train_rul_bins: true
+  rul_bin_edges: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  train_balance_mode: hybrid
+  train_balance_target: median
+  train_balance_seed: 42
+  valid_split_variant: official_default
+

@@ -94,6 +94,50 @@ Outputs:
 - `outputs/results/benchmark_results.csv`
 - `outputs/benchmark_results.png`
 
+## Ablation Study
+
+Legacy A/B/C/D ablations are preserved, and an extended publication-ready matrix
+is available for optimization, HI pathway, attention internals, and backbone
+comparisons.
+
+See full matrix and commands:
+
+- `docs/ablation_study.md`
+
+Quick start:
+
+```bash
+python scripts/run_ablation.py --list
+python scripts/run_ablation.py --suite legacy
+python scripts/run_ablation.py --suite optimization
+python scripts/run_ablation.py --suite all --dry-run
+```
+
+## Data Split & Sampling Experiments
+
+Data-side controls live in `configs/config.yaml`:
+
+- `valid_bearing_ids` / `valid_split_variant`: run-level validation split selection (anti-leakage preserved).
+- `auto_valid_bearings_count`: when no valid IDs are supplied, auto-select 1-2 learning bearings for validation.
+- `balance_train_rul_bins`: enable training-only RUL-stage balancing.
+- `rul_bin_edges`: normalized RUL bins (default `[0.0, 0.2, 0.4, 0.6, 0.8, 1.0]`, plus open-ended final bin).
+- `train_balance_mode`: `oversample | downsample | hybrid`.
+- `train_balance_target`: `auto | min | median | max | custom`.
+- `train_balance_custom_count`: target count per bin when `custom`.
+- `train_balance_seed`: balancing seed (falls back to experiment seed).
+- Default `configs/config.yaml` now enables balanced train-bin sampling with `hybrid + median` and uses 2 validation bearings with a 4-bin minimum coverage target.
+- `train.hi_target_mode`: fixed to `health`; higher HI indicates healthier state (larger RUL).
+- `model.use_fixed_hi`: when `true`, HI is deterministic (`HI = normalized RUL`) and HI auxiliary losses are disabled.
+
+Ready-to-run presets for data comparisons:
+
+```bash
+python scripts/train.py --config configs/data_compare/baseline_data.yaml
+python scripts/train.py --config configs/data_compare/balanced_train.yaml
+python scripts/train.py --config configs/data_compare/alt_valid_split.yaml
+python scripts/train.py --config configs/data_compare/balanced_train_alt_valid.yaml
+```
+
 ## Online Prediction
 
 Single file:
