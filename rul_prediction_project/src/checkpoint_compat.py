@@ -24,7 +24,11 @@ def detect_checkpoint_head_variant(model_state: Mapping[str, torch.Tensor]) -> s
     return "unknown"
 
 
-def resolve_rul_head_mode(model_cfg: Mapping[str, object], default: str = "hi_guided_residual") -> str:
+def resolve_rul_head_mode(
+    model_cfg: Mapping[str, object],
+    default: str = "hi_guided_residual",
+    checkpoint_variant: str | None = None,
+) -> str:
     """Resolve head mode, supporting optional alias model_head_variant."""
 
     explicit_mode = str(model_cfg.get("rul_head_mode", "")).strip().lower()
@@ -35,6 +39,11 @@ def resolve_rul_head_mode(model_cfg: Mapping[str, object], default: str = "hi_gu
         return "plain"
     if variant == "hi_driven":
         return "hi_guided_residual"
+    if variant == "auto":
+        if checkpoint_variant == "old":
+            return "plain"
+        if checkpoint_variant == "hi_driven":
+            return "hi_guided_residual"
     return default
 
 

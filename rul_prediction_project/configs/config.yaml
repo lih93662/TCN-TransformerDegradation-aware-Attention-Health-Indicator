@@ -52,8 +52,7 @@ model:
   attention_temperature: 1.0
   attention_recency_strength: 0.5
   head_hidden_dim: 32
-  model_head_variant: "hi_driven"  # optional alias: old | hi_driven
-  rul_head_mode: "hi_guided_residual"  # plain | concat_hi | hi_guided_residual
+  model_head_variant: "auto"  # optional alias: auto | old | hi_driven
   hi_residual_scale: 0.25  # smaller => HI trend dominates, features provide refinement
   output_activation: "identity"
 

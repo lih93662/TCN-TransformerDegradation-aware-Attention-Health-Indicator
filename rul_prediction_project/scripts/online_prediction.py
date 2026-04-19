@@ -33,7 +33,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
-from src.checkpoint_compat import load_model_state_strict, resolve_rul_head_mode
+from src.checkpoint_compat import (
+    detect_checkpoint_head_variant,
+    load_model_state_strict,
+    resolve_rul_head_mode,
+)
 from src.preprocess import StandardScaler, prepare_datasets
 from src.utils import get_device, load_yaml, set_seed
 
@@ -174,6 +178,8 @@ def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device) -> Hybri
     """Instantiate and load the hybrid model from checkpoint."""
 
     m = cfg["model"]
+    payload = torch.load(checkpoint_path, map_location=device)
+    checkpoint_head_variant = detect_checkpoint_head_variant(payload["model_state"])
     model_cfg = ModelConfig(
         sensor_dim=2,
         tcn_channels=int(m["tcn_channels"]),
@@ -184,12 +190,15 @@ def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device) -> Hybri
         transformer_layers=int(m["transformer_layers"]),
         transformer_ffn_dim=int(m["transformer_ffn_dim"]),
         dropout=float(m["dropout"]),
-        rul_head_mode=resolve_rul_head_mode(m, default="hi_guided_residual"),
+        rul_head_mode=resolve_rul_head_mode(
+            m,
+            default="hi_guided_residual",
+            checkpoint_variant=checkpoint_head_variant,
+        ),
         hi_residual_scale=float(m.get("hi_residual_scale", 0.3)),
     )
 
     model = HybridRULModel(model_cfg).to(device)
-    payload = torch.load(checkpoint_path, map_location=device)
     load_model_state_strict(model, payload)
     return model
 

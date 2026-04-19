@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 from src.evaluator import evaluate_model, group_predictions_by_id
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
-from src.checkpoint_compat import load_model_state_strict, resolve_rul_head_mode
+from src.checkpoint_compat import detect_checkpoint_head_variant, load_model_state_strict, resolve_rul_head_mode
 from src.preprocess import prepare_datasets
 from src.utils import configure_logging, ensure_project_paths, get_device, load_yaml, set_seed
 
@@ -224,6 +224,15 @@ def main() -> None:
         seed=seed,
     )
 
+    device = get_device()
+    ckpt_path = Path(args.checkpoint)
+    payload = torch.load(ckpt_path, map_location=device) if ckpt_path.exists() else None
+    checkpoint_head_variant = (
+        detect_checkpoint_head_variant(payload["model_state"])
+        if payload is not None
+        else None
+    )
+
     model_cfg = ModelConfig(
         sensor_dim=prepared.feature_dim,
         tcn_channels=int(cfg["model"]["tcn_channels"]),
@@ -234,16 +243,19 @@ def main() -> None:
         transformer_layers=int(cfg["model"]["transformer_layers"]),
         transformer_ffn_dim=int(cfg["model"]["transformer_ffn_dim"]),
         dropout=float(cfg["model"]["dropout"]),
-        rul_head_mode=resolve_rul_head_mode(cfg["model"], default="hi_guided_residual"),
+        rul_head_mode=resolve_rul_head_mode(
+            cfg["model"],
+            default="hi_guided_residual",
+            checkpoint_variant=checkpoint_head_variant,
+        ),
         hi_residual_scale=float(cfg["model"].get("hi_residual_scale", 0.3)),
     )
 
     model = HybridRULModel(model_cfg)
-    device = get_device()
-    ckpt_path = Path(args.checkpoint)
 
-    if ckpt_path.exists():
-        payload = torch.load(ckpt_path, map_location=device)
+    if payload is not None:
+        if checkpoint_head_variant is not None:
+            logger.info("Checkpoint head variant detected: %s", checkpoint_head_variant)
         load_model_state_strict(model, payload)
         logger.info("Loaded checkpoint for figure generation")
     else:
