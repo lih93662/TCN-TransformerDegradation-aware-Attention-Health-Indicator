@@ -48,6 +48,7 @@ class TrainerConfig:
     hi_variance_weight: float = 0.03
     hi_variance_floor: float = 0.08
     hi_smoothness_weight: float = 0.01
+    residual_regularization_weight: float = 0.0
     hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
 
@@ -158,6 +159,7 @@ class Trainer:
             "hi_rank": 0.0,
             "hi_var_penalty": 0.0,
             "hi_smoothness": 0.0,
+            "residual_penalty": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -229,6 +231,13 @@ class Trainer:
                         hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")
+                residual_penalty = torch.tensor(0.0, device=self.device)
+                if (
+                    str(getattr(self.model, "rul_head_mode", "plain")).lower() == "hi_guided_residual"
+                    and self.config.residual_regularization_weight > 0
+                    and out.get("residual_component") is not None
+                ):
+                    residual_penalty = out["residual_component"].abs().mean()
                 if (not fixed_hi_mode) and self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
                     smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
                     hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
@@ -240,6 +249,7 @@ class Trainer:
                     + self.config.hi_rank_weight * hi_rank
                     + self.config.hi_variance_weight * hi_var_pen
                     + self.config.hi_smoothness_weight * hi_smoothness
+                    + self.config.residual_regularization_weight * residual_penalty
                 )
 
                 if train:
@@ -264,6 +274,7 @@ class Trainer:
                 totals["hi_rank"] += float(hi_rank.item())
                 totals["hi_var_penalty"] += float(hi_var_pen.item())
                 totals["hi_smoothness"] += float(hi_smoothness.item())
+                totals["residual_penalty"] += float(residual_penalty.item())
 
                 hi = out.get("hi")
                 if hi is not None:

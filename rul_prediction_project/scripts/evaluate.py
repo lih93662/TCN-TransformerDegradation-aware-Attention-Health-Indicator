@@ -94,9 +94,9 @@ def parse_args() -> argparse.Namespace:
         help="Skip attention averaging/plots to reduce memory use.",
     )
     parser.add_argument(
-        "--disable-linear-calibration",
+        "--enable-linear-calibration",
         action="store_true",
-        help="Disable post-hoc linear calibration fitted on validation predictions.",
+        help="Enable post-hoc linear calibration fitted on validation predictions (default: disabled).",
     )
     return parser.parse_args()
 
@@ -277,7 +277,7 @@ def main() -> None:
     y_pred = result.y_pred.astype(np.float32)
     residuals = y_pred - y_true
     calibration = {"enabled": False, "a": 1.0, "b": 0.0, "source_split": "none"}
-    if args.split == "test" and not args.disable_linear_calibration:
+    if args.split == "test" and args.enable_linear_calibration:
         logger.info("Fitting linear calibration on validation split and applying to test split.")
         valid_loader = DataLoader(prepared.valid_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
         valid_result = evaluate_model(
@@ -290,8 +290,8 @@ def main() -> None:
         a, b = _fit_linear_calibration(valid_result.y_pred.astype(np.float32), valid_result.y_true.astype(np.float32))
         calibration = {"enabled": True, "a": float(a), "b": float(b), "source_split": "valid"}
         logger.info("Linear calibration coefficients: a=%.6f, b=%.6f", a, b)
-    elif args.disable_linear_calibration:
-        logger.info("Linear calibration disabled by CLI flag.")
+    elif args.split == "test":
+        logger.info("Linear calibration disabled by default. Pass --enable-linear-calibration to enable it.")
     else:
         logger.info("Linear calibration skipped because evaluation split is '%s'.", args.split)
 

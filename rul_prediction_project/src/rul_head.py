@@ -88,7 +88,9 @@ class HIGuidedResidualRULHead(nn.Module):
         self.output_activation = OutputActivation(activation=activation)
 
     def forward(self, features: torch.Tensor, hi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        hi_component = self.hi_trend(hi)
-        residual_component = self.residual(features) * self.residual_scale
+        # Keep a direct HI passthrough so prediction is always explicitly HI-driven.
+        hi_component = hi + self.hi_trend(hi)
+        # Bound residual correction magnitude to prevent feature branch from dominating.
+        residual_component = torch.tanh(self.residual(features)) * self.residual_scale
         pred = self.output_activation(hi_component + residual_component)
         return pred, hi_component, residual_component
