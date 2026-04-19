@@ -123,6 +123,8 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         attention_temperature=float(m.get("attention_temperature", 1.0)),
         attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),
+        rul_head_mode=str(m.get("rul_head_mode", "hi_guided_residual")),
+        hi_residual_scale=float(m.get("hi_residual_scale", 0.3)),
         output_activation=str(m.get("output_activation", "identity")),
     )
     return HybridRULModel(model_cfg).to(device)

@@ -89,6 +89,8 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
+        rul_head_mode=str(model_cfg_raw.get("rul_head_mode", "hi_guided_residual")),
+        hi_residual_scale=float(model_cfg_raw.get("hi_residual_scale", 0.3)),
         output_activation=str(model_cfg_raw.get("output_activation", "identity")),
     )
 
