@@ -77,6 +77,17 @@ def parse_args() -> argparse.Namespace:
         choices=["valid", "test"],
         help="Dataset split used for evaluation.",
     )
+    parser.add_argument(
+        "--max-attention-samples",
+        type=int,
+        default=None,
+        help="Optional cap on number of attention samples to store/export.",
+    )
+    parser.add_argument(
+        "--skip-attention-export",
+        action="store_true",
+        help="Skip attention averaging/plots to reduce memory use.",
+    )
     return parser.parse_args()
 
 
@@ -115,8 +126,23 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
 def _attention_average(attention_maps: List[np.ndarray], window_size: int) -> np.ndarray:
     if not attention_maps:
         return np.eye(window_size, dtype=np.float32)
-    stacked = np.stack(attention_maps, axis=0).astype(np.float32)
-    return stacked.mean(axis=(0, 1))
+    running_sum: np.ndarray | None = None
+    count = 0
+    for amap in attention_maps:
+        arr = np.asarray(amap, dtype=np.float32)
+        if arr.ndim == 3:
+            arr = arr.mean(axis=0)
+        elif arr.ndim == 2:
+            pass
+        else:
+            continue
+        if running_sum is None:
+            running_sum = np.zeros_like(arr, dtype=np.float32)
+        running_sum += arr
+        count += 1
+    if running_sum is None or count == 0:
+        return np.eye(window_size, dtype=np.float32)
+    return running_sum / float(count)
 
 def _figure_path(figures_dir: Path, filename: str) -> Path:
     path = figures_dir / filename
@@ -127,6 +153,7 @@ def _figure_path(figures_dir: Path, filename: str) -> Path:
 def main() -> None:
     args = parse_args()
     cfg = load_yaml(args.config)
+    eval_cfg = cfg.get("evaluation", {})
 
     seed = int(cfg["experiment"].get("seed", 42))
     run_name = build_run_name(
@@ -183,7 +210,26 @@ def main() -> None:
     logger.info("Loaded checkpoint %s from epoch %s", ckpt, payload.get("epoch", "unknown"))
 
     loader = DataLoader(split_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
-    result = evaluate_model(model, loader, device)
+    cfg_max_attention = eval_cfg.get("max_attention_samples")
+    max_attention_samples = (
+        args.max_attention_samples
+        if args.max_attention_samples is not None
+        else (None if cfg_max_attention is None else int(cfg_max_attention))
+    )
+    skip_attention_export = bool(eval_cfg.get("skip_attention_export", False)) or bool(args.skip_attention_export)
+    logger.info(
+        "Attention export settings | skip=%s | max_attention_samples=%s | streaming_average=%s",
+        skip_attention_export,
+        max_attention_samples if max_attention_samples is not None else "all",
+        True,
+    )
+    result = evaluate_model(
+        model,
+        loader,
+        device,
+        max_attention_samples=max_attention_samples,
+        skip_attention_export=skip_attention_export,
+    )
 
     y_true = result.y_true.astype(np.float32)
     y_pred = result.y_pred.astype(np.float32)
@@ -210,7 +256,8 @@ def main() -> None:
         row_norm["mean_bias_raw"] = row_raw["mean_bias"]
 
     attention_mean = _attention_average(result.attention_maps, window_size=int(data_cfg.get("window_size", 40)))
-    temporal_attention_examples = result.temporal_attention[: int(cfg.get("evaluation", {}).get("attention_num_samples", 3))]
+    temporal_attention_examples = result.temporal_attention[: int(eval_cfg.get("attention_num_samples", 3))]
+    logger.info("Collected %d attention samples for export.", len(result.attention_maps))
 
     eval_dir = paths["run_results"] / f"evaluation_{args.split}"
     figures_dir = eval_dir / "figures"
@@ -229,14 +276,16 @@ def main() -> None:
     plot_prediction_distribution(y_true, y_pred, _figure_path(figures_dir, "prediction_distribution_normalized.png"))
     plot_prediction_distribution(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_distribution_raw.png"))
     plot_hi_curve(result.hi, _figure_path(figures_dir, "health_indicator_curve.png"))
-    plot_attention(attention_mean, _figure_path(figures_dir, "attention_heatmap_mean.png"))
-
-    for idx, temporal_weights in enumerate(temporal_attention_examples, start=1):
-        plot_attention_weights(
-            np.asarray(temporal_weights, dtype=np.float32),
-            _figure_path(figures_dir, f"temporal_attention_sample_{idx}.png"),
-            title=f"Temporal Attention Weights Sample {idx}",
-        )
+    if not skip_attention_export:
+        plot_attention(attention_mean, _figure_path(figures_dir, "attention_heatmap_mean.png"))
+        for idx, temporal_weights in enumerate(temporal_attention_examples, start=1):
+            plot_attention_weights(
+                np.asarray(temporal_weights, dtype=np.float32),
+                _figure_path(figures_dir, f"temporal_attention_sample_{idx}.png"),
+                title=f"Temporal Attention Weights Sample {idx}",
+            )
+    else:
+        logger.info("Skipping attention export artifacts by configuration.")
 
     grouped = group_predictions_by_id(result.ids, y_true_raw, y_pred_raw, result.hi)
     hi_summary = {
