@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.checkpoint_compat import load_model_state_strict, resolve_rul_head_mode
 from src.evaluator import evaluate_model, group_predictions_by_id, grouped_regression_metrics
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
 from src.loss import compute_regression_metrics, phm2012_score
@@ -123,7 +124,7 @@ def _build_model(cfg: Dict, sensor_dim: int, device: torch.device) -> HybridRULM
         attention_temperature=float(m.get("attention_temperature", 1.0)),
         attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),
-        rul_head_mode=str(m.get("rul_head_mode", "hi_guided_residual")),
+        rul_head_mode=resolve_rul_head_mode(m, default="hi_guided_residual"),
         hi_residual_scale=float(m.get("hi_residual_scale", 0.3)),
         output_activation=str(m.get("output_activation", "identity")),
     )
@@ -228,7 +229,7 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
     payload = _safe_load_checkpoint(ckpt, device)
-    model.load_state_dict(payload["model_state"])
+    load_model_state_strict(model, payload)
     logger.info("Loaded checkpoint %s from epoch %s", ckpt, payload.get("epoch", "unknown"))
 
     loader = DataLoader(split_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)

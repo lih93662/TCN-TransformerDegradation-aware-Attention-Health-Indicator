@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 
 from src.evaluator import evaluate_model, group_predictions_by_id
 from src.hybrid_rul_model import HybridRULModel, ModelConfig
+from src.checkpoint_compat import load_model_state_strict, resolve_rul_head_mode
 from src.preprocess import prepare_datasets
 from src.utils import configure_logging, ensure_project_paths, get_device, load_yaml, set_seed
 
@@ -233,6 +234,8 @@ def main() -> None:
         transformer_layers=int(cfg["model"]["transformer_layers"]),
         transformer_ffn_dim=int(cfg["model"]["transformer_ffn_dim"]),
         dropout=float(cfg["model"]["dropout"]),
+        rul_head_mode=resolve_rul_head_mode(cfg["model"], default="hi_guided_residual"),
+        hi_residual_scale=float(cfg["model"].get("hi_residual_scale", 0.3)),
     )
 
     model = HybridRULModel(model_cfg)
@@ -241,7 +244,7 @@ def main() -> None:
 
     if ckpt_path.exists():
         payload = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(payload["model_state"])
+        load_model_state_strict(model, payload)
         logger.info("Loaded checkpoint for figure generation")
     else:
         logger.warning("Checkpoint not found. Figures based on random-initialized model outputs.")

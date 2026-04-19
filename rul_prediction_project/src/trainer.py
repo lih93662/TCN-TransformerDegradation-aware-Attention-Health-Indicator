@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from .checkpoint_compat import load_model_state_strict
 from .evaluator import evaluate_model
 from .loss import RawRegressionLoss, compute_regression_metrics
 from .utils import save_csv_rows, save_json
@@ -669,7 +670,7 @@ class Trainer:
                 payload = torch.load(self.checkpoint_path, map_location=self.device, weights_only=True)
             except TypeError:
                 payload = torch.load(self.checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(payload["model_state"])
+            load_model_state_strict(self.model, payload)
             self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 
         test_loader = self._make_loader(test_dataset, shuffle=False)

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.hybrid_rul_model import HybridRULModel, ModelConfig, count_parameters
+from src.checkpoint_compat import resolve_rul_head_mode
 from src.preprocess import prepare_datasets, summarize_dataset
 from src.trainer import Trainer, TrainerConfig
 from src.utils import (
@@ -89,7 +90,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
-        rul_head_mode=str(model_cfg_raw.get("rul_head_mode", "hi_guided_residual")),
+        rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="hi_guided_residual"),
         hi_residual_scale=float(model_cfg_raw.get("hi_residual_scale", 0.3)),
         output_activation=str(model_cfg_raw.get("output_activation", "identity")),
     )
