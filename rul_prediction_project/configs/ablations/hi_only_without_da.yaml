@@ -1,0 +1,8 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: ablation_hi_only_without_da
+
+model:
+  use_hi: true
+  use_attention: false

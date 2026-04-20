@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from .degradation_attention import DegradationAwareAttention
 from .health_indicator import HealthIndicatorNet
-from .rul_head import FusionMLP, RULHead
+from .rul_head import FusionMLP, HIGuidedResidualRULHead, RULHead
 from .tcn import TCNEncoder
 from .transformer_encoder import TransformerTemporalEncoder
 
@@ -26,10 +26,23 @@ class ModelConfig:
     transformer_layers: int = 2
     transformer_ffn_dim: int = 256
     dropout: float = 0.1
+    backbone_variant: str = "tcn_transformer"
+    use_hi: bool = True
+    use_fixed_hi: bool = False
+    hi_input_source: str = "tcn"
+    hi_output_temperature: float = 1.2
     use_attention: bool = True
+    attention_use_hi_bias: bool = True
+    attention_use_hi_logit: bool = True
+    attention_use_temporal_gate: bool = True
+    attention_use_recency_bias: bool = True
+    attention_conditioning_gain: float = 2.0
+    attention_head_bias_gain: float = 2.0
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
+    rul_head_mode: str = "hi_guided_residual"
+    hi_residual_scale: float = 0.3
     output_activation: str = "identity"
 
 
@@ -39,6 +52,9 @@ class HybridRULModel(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
+        self.backbone_variant = str(cfg.backbone_variant).lower()
+        if self.backbone_variant not in {"tcn_transformer", "tcn_only", "transformer_only"}:
+            raise ValueError(f"Unsupported backbone_variant: {cfg.backbone_variant}")
 
         self.tcn = TCNEncoder(
             input_dim=cfg.sensor_dim,
@@ -47,15 +63,27 @@ class HybridRULModel(nn.Module):
             dilations=cfg.tcn_dilations,
             dropout=cfg.dropout,
         )
+        tr_input_dim = cfg.tcn_channels if self.backbone_variant != "transformer_only" else cfg.sensor_dim
         self.transformer = TransformerTemporalEncoder(
-            input_dim=cfg.tcn_channels,
+            input_dim=tr_input_dim,
             embedding_dim=cfg.transformer_embed_dim,
             heads=cfg.transformer_heads,
             layers=cfg.transformer_layers,
             ffn_dim=cfg.transformer_ffn_dim,
             dropout=cfg.dropout,
         )
-        self.hi = HealthIndicatorNet(sensor_dim=cfg.sensor_dim)
+        self.use_hi = bool(cfg.use_hi)
+        self.hi = (
+            HealthIndicatorNet(
+                sensor_dim=cfg.sensor_dim,
+                tcn_channels=cfg.tcn_channels,
+                hi_input_source=cfg.hi_input_source,
+                output_temperature=cfg.hi_output_temperature,
+            )
+            if self.use_hi
+            else None
+        )
+        self.hi_feature_dim = self.hi.feature_dim if self.hi is not None else (cfg.sensor_dim * 4)
         self.use_attention = bool(cfg.use_attention)
         if self.use_attention:
             self.degradation_attention = DegradationAwareAttention(
@@ -64,6 +92,11 @@ class HybridRULModel(nn.Module):
                 dropout=cfg.dropout,
                 temperature=cfg.attention_temperature,
                 recency_strength=cfg.attention_recency_strength,
+                use_hi_bias=cfg.attention_use_hi_bias,
+                use_temporal_gate=cfg.attention_use_temporal_gate,
+                use_recency_bias=cfg.attention_use_recency_bias,
+                conditioning_gain=cfg.attention_conditioning_gain,
+                head_bias_gain=cfg.attention_head_bias_gain,
             )
             attention_dim = cfg.transformer_embed_dim
         else:
@@ -72,25 +105,84 @@ class HybridRULModel(nn.Module):
 
         fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + 1
         self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
-        self.rul_head = RULHead(
-            input_dim=64,
-            hidden_dim=cfg.head_hidden_dim,
-            activation=cfg.output_activation,
-        )
+        self.rul_head_mode = str(cfg.rul_head_mode).lower()
+        if self.rul_head_mode == "plain":
+            self.rul_head = RULHead(
+                input_dim=64,
+                hidden_dim=cfg.head_hidden_dim,
+                activation=cfg.output_activation,
+            )
+        elif self.rul_head_mode == "concat_hi":
+            self.rul_head = RULHead(
+                input_dim=65,
+                hidden_dim=cfg.head_hidden_dim,
+                activation=cfg.output_activation,
+            )
+        elif self.rul_head_mode == "hi_guided_residual":
+            self.rul_head = HIGuidedResidualRULHead(
+                feature_dim=64,
+                hidden_dim=cfg.head_hidden_dim,
+                activation=cfg.output_activation,
+                residual_scale=cfg.hi_residual_scale,
+            )
+        else:
+            raise ValueError(f"Unsupported rul_head_mode: {cfg.rul_head_mode}")
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        # Stage 1: TCN
-        tcn_seq, tcn_pool = self.tcn(x)
-
-        # Stage 2: Transformer
-        tr_seq, tr_pool = self.transformer(tcn_seq)
+    def forward(self, x: torch.Tensor, fixed_hi: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
+        # Stage 1/2 backbone variants
+        if self.backbone_variant == "tcn_only":
+            tcn_seq, tcn_pool = self.tcn(x)
+            tr_seq = torch.zeros(
+                (x.size(0), tcn_seq.size(1), self.cfg.transformer_embed_dim),
+                device=x.device,
+                dtype=x.dtype,
+            )
+            tr_pool = torch.zeros(
+                (x.size(0), self.cfg.transformer_embed_dim),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        elif self.backbone_variant == "transformer_only":
+            tr_seq, tr_pool = self.transformer(x)
+            tcn_seq = None
+            tcn_pool = torch.zeros(
+                (x.size(0), self.cfg.tcn_channels),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        else:
+            tcn_seq, tcn_pool = self.tcn(x)
+            tr_seq, tr_pool = self.transformer(tcn_seq)
 
         # HI module from raw input
-        hi_score, hi_stats = self.hi(x)
+        if bool(self.cfg.use_fixed_hi):
+            if fixed_hi is None:
+                raise ValueError("Model configured with use_fixed_hi=True requires fixed_hi input.")
+            hi_score = torch.clamp(fixed_hi, 0.0, 1.0).view(-1, 1)
+            hi_health = hi_score
+            hi_logit = torch.logit(torch.clamp(hi_score, 1e-4, 1.0 - 1e-4))
+            hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
+            hi_temporal = None
+            hi_temporal_logit = None
+        elif self.use_hi and self.hi is not None:
+            hi_health, hi_stats, hi_temporal, hi_temporal_logit, hi_logit = self.hi(x, tcn_seq=tcn_seq)
+            # Project-level default: expose HI as health score where larger values
+            # indicate healthier state / larger remaining life.
+            hi_score = hi_health
+        else:
+            hi_score = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
+            hi_stats = torch.zeros((x.size(0), self.hi_feature_dim), device=x.device, dtype=x.dtype)
+            hi_temporal = None
+            hi_temporal_logit = None
+            hi_logit = torch.zeros((x.size(0), 1), device=x.device, dtype=x.dtype)
+            hi_health = hi_score
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
-            da_feat, attn_map, temporal_attn = self.degradation_attention(tr_seq, hi_score)
+            attn_hi = hi_logit if self.cfg.attention_use_hi_logit else hi_score
+            if not self.cfg.attention_use_hi_bias:
+                attn_hi = None
+            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, attn_hi)
         else:
             da_feat = tr_pool
             temporal_attn = torch.full(
@@ -100,24 +192,41 @@ class HybridRULModel(nn.Module):
                 dtype=tr_seq.dtype,
             )
             attn_map = None
+            attention_debug = None
 
         # Stage 4: Feature fusion
         fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
         fused = self.fusion(fused)
 
         # Stage 5: Prediction
-        pred = self.rul_head(fused)
+        if self.rul_head_mode == "plain":
+            pred = self.rul_head(fused)
+            hi_component = torch.zeros_like(pred)
+            residual_component = pred
+        elif self.rul_head_mode == "concat_hi":
+            pred = self.rul_head(torch.cat([fused, hi_score], dim=-1))
+            hi_component = torch.zeros_like(pred)
+            residual_component = pred
+        else:
+            pred, hi_component, residual_component = self.rul_head(fused, hi_score)
 
         return {
             "pred": pred,
             "hi": hi_score,
+            "hi_health": hi_health,
+            "hi_logit": hi_logit,
             "hi_stats": hi_stats,
+            "hi_temporal": hi_temporal,
+            "hi_temporal_logit": hi_temporal_logit,
             "tcn_pool": tcn_pool,
             "transformer_pool": tr_pool,
             "degradation_feat": da_feat,
             "attn_map": attn_map,
+            "attention_debug": attention_debug,
             "temporal_attn": temporal_attn,
             "fusion_feat": fused,
+            "hi_trend_component": hi_component,
+            "residual_component": residual_component,
         }
 
 
