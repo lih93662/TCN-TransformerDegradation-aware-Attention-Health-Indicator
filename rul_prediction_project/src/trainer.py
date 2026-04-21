@@ -45,8 +45,9 @@ class TrainerConfig:
     correlation_regularization_weight: float = 0.0
     hi_supervision_weight: float = 0.0
     hi_rank_weight: float = 0.0
-    hi_variance_weight: float = 0.03
-    hi_variance_floor: float = 0.08
+    hi_monotonic_weight: float = 0.1
+    hi_variance_weight: float = 0.05
+    hi_variance_floor: float = 0.05
     hi_smoothness_weight: float = 0.01
     residual_regularization_weight: float = 0.0
     hi_supervision_mode: str = "weak"
@@ -155,6 +156,7 @@ class Trainer:
             "corr_value": 0.0,
             "hi_supervision": 0.0,
             "hi_rank": 0.0,
+            "hi_monotonic": 0.0,
             "hi_var_penalty": 0.0,
             "hi_smoothness": 0.0,
             "residual_penalty": 0.0,
@@ -213,27 +215,8 @@ class Trainer:
                             hi_temporal_rank[:, -1] - hi_temporal_rank[:, 0]
                         ).mean()
                 if (not fixed_hi_mode) and self.config.hi_variance_weight > 0 and out.get("hi") is not None:
-                    # Penalize low variance directly on bounded HI output to
-                    # prevent near-constant HI collapse.
-                    hi_for_var = out["hi"]
-                    batch_ids = list(batch.get("id", []))
-                    penalties = []
-                    if batch_ids:
-                        unique_ids = sorted(set(batch_ids))
-                        for uid in unique_ids:
-                            idx = [i for i, bid in enumerate(batch_ids) if bid == uid]
-                            if len(idx) < 2:
-                                continue
-                            idx_t = torch.as_tensor(idx, device=self.device, dtype=torch.long)
-                            hi_std_i = torch.std(hi_for_var.index_select(0, idx_t).view(-1), unbiased=False)
-                            penalties.append(
-                                torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std_i).pow(2)
-                            )
-                    if penalties:
-                        hi_var_pen = torch.stack(penalties).mean()
-                    else:
-                        hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
-                        hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+                    hi_std = torch.std(out["hi"].view(-1), unbiased=False)
+                    hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")
                 residual_penalty = torch.tensor(0.0, device=self.device)
@@ -256,8 +239,9 @@ class Trainer:
                     loss_out.total
                     + self.config.hi_supervision_weight * hi_sup
                     + self.config.hi_rank_weight * hi_rank
+                    + self.config.hi_monotonic_weight * hi_monotonic
                     + self.config.hi_variance_weight * hi_var_pen
-                    + self.config.hi_smoothness_weight * (hi_smoothness + hi_monotonic)
+                    + self.config.hi_smoothness_weight * hi_smoothness
                     + self.config.residual_regularization_weight * residual_penalty
                 )
 
@@ -281,6 +265,7 @@ class Trainer:
                 totals["corr_value"] += float(loss_out.corr_value.item())
                 totals["hi_supervision"] += float(hi_sup.item())
                 totals["hi_rank"] += float(hi_rank.item())
+                totals["hi_monotonic"] += float(hi_monotonic.item())
                 totals["hi_var_penalty"] += float(hi_var_pen.item())
                 totals["hi_smoothness"] += float(hi_smoothness.item())
                 totals["residual_penalty"] += float(residual_penalty.item())
@@ -368,6 +353,7 @@ class Trainer:
             f"{mode}_corr_value": totals["corr_value"] / n,
             f"{mode}_hi_supervision": totals["hi_supervision"] / n,
             f"{mode}_hi_rank": totals["hi_rank"] / n,
+            f"{mode}_hi_monotonic": totals["hi_monotonic"] / n,
             f"{mode}_hi_var_penalty": totals["hi_var_penalty"] / n,
             f"{mode}_hi_smoothness": totals["hi_smoothness"] / n,
             f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
@@ -592,9 +578,9 @@ class Trainer:
             self.logger.info(
                 (
                     "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
-                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f | "
+                    "hi_sup %.6f hi_rank %.6f hi_mono %.6f hi_var %.6f hi_smooth %.6f | "
                     "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
-                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f"
+                    "hi_sup %.6f hi_rank %.6f hi_mono %.6f hi_var %.6f hi_smooth %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -607,6 +593,7 @@ class Trainer:
                 tr["train_corr_value"],
                 tr["train_hi_supervision"],
                 tr["train_hi_rank"],
+                tr["train_hi_monotonic"],
                 tr["train_hi_var_penalty"],
                 tr["train_hi_smoothness"],
                 va["valid_rmse"],
@@ -616,6 +603,7 @@ class Trainer:
                 va["valid_corr_value"],
                 va["valid_hi_supervision"],
                 va["valid_hi_rank"],
+                va["valid_hi_monotonic"],
                 va["valid_hi_var_penalty"],
                 va["valid_hi_smoothness"],
             )
