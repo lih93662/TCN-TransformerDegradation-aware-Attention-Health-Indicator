@@ -121,6 +121,7 @@ class DegradationAwareAttention(nn.Module):
         base_attn = torch.softmax(base_scores, dim=-1)
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
+        attn_entropy = -(attn * torch.log(torch.clamp(attn, min=1e-8))).sum(dim=-1).mean()
 
         context = torch.matmul(attn, v)
         context = self.out_proj(self._combine_heads(context))
@@ -152,5 +153,6 @@ class DegradationAwareAttention(nn.Module):
             "degradation_bias_mean": degradation_bias.mean(),
             "degradation_bias_std": degradation_bias.std(unbiased=False),
             "attn_delta_l1": torch.mean(torch.abs(attn - base_attn)),
+            "attn_entropy": attn_entropy,
         }
         return weighted_vector, attn, temporal_weights, debug

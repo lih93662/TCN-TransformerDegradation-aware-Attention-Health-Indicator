@@ -41,7 +41,8 @@ class ModelConfig:
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
-    rul_head_mode: str = "hi_guided_residual"
+    use_hi_in_rul_head: bool = False
+    rul_head_mode: str = "plain"
     hi_residual_scale: float = 0.3
     output_activation: str = "identity"
 
@@ -103,9 +104,14 @@ class HybridRULModel(nn.Module):
             self.degradation_attention = None
             attention_dim = cfg.transformer_embed_dim
 
-        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + 1
+        self.use_hi_in_rul_head = bool(cfg.use_hi_in_rul_head)
+        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + (1 if self.use_hi_in_rul_head else 0)
         self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
         self.rul_head_mode = str(cfg.rul_head_mode).lower()
+        if not self.use_hi_in_rul_head and self.rul_head_mode in {"concat_hi", "hi_guided_residual"}:
+            # Guard against shortcut learning: if HI is disabled for head input,
+            # force pure feature-based head.
+            self.rul_head_mode = "plain"
         if self.rul_head_mode == "plain":
             self.rul_head = RULHead(
                 input_dim=64,
@@ -195,7 +201,10 @@ class HybridRULModel(nn.Module):
             attention_debug = None
 
         # Stage 4: Feature fusion
-        fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
+        fused_inputs = [tcn_pool, tr_pool, da_feat]
+        if self.use_hi_in_rul_head:
+            fused_inputs.append(hi_score)
+        fused = torch.cat(fused_inputs, dim=-1)
         fused = self.fusion(fused)
 
         # Stage 5: Prediction

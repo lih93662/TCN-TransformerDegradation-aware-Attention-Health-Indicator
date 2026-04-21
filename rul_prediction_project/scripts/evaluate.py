@@ -139,6 +139,7 @@ def _build_model(
         attention_temperature=float(m.get("attention_temperature", 1.0)),
         attention_recency_strength=float(m.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),
+        use_hi_in_rul_head=bool(m.get("use_hi_in_rul_head", False)),
         rul_head_mode=resolve_rul_head_mode(
             m,
             default="hi_guided_residual",

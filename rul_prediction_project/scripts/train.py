@@ -90,6 +90,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
+        use_hi_in_rul_head=bool(model_cfg_raw.get("use_hi_in_rul_head", False)),
         rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="hi_guided_residual"),
         hi_residual_scale=float(model_cfg_raw.get("hi_residual_scale", 0.3)),
         output_activation=str(model_cfg_raw.get("output_activation", "identity")),
@@ -137,6 +138,7 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.08)),
         hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.01)),
         residual_regularization_weight=float(train_cfg_raw.get("residual_regularization_weight", 0.0)),
+        hi_supervision_mode=str(train_cfg_raw.get("hi_supervision_mode", "weak")),
         hi_target_mode=str(train_cfg_raw.get("hi_target_mode", "degradation")),
     )
 

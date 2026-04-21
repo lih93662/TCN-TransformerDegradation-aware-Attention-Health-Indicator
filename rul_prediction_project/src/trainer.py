@@ -49,6 +49,7 @@ class TrainerConfig:
     hi_variance_floor: float = 0.08
     hi_smoothness_weight: float = 0.01
     residual_regularization_weight: float = 0.0
+    hi_supervision_mode: str = "weak"
     hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
 
@@ -86,11 +87,8 @@ class Trainer:
             correlation_regularization_weight=config.correlation_regularization_weight,
         )
         self.optimizer = Adam(self.model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-        if str(config.hi_target_mode).lower() != "health":
-            raise ValueError(
-                "HI semantic convention is fixed to health mode (higher HI => larger RUL). "
-                "Set train.hi_target_mode='health'."
-            )
+        if str(config.hi_supervision_mode).lower() not in {"weak", "direct"}:
+            raise ValueError("train.hi_supervision_mode must be one of: weak, direct")
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode="min",
@@ -171,6 +169,7 @@ class Trainer:
         attn_head_bias_std_sum = 0.0
         attn_degradation_bias_std_sum = 0.0
         attn_delta_sum = 0.0
+        attn_entropy_sum = 0.0
         attn_batches = 0
         attn_map_sum: np.ndarray | None = None
         hi_mean_sum = 0.0
@@ -197,16 +196,22 @@ class Trainer:
                 hi_rank = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
                 hi_smoothness = torch.tensor(0.0, device=self.device)
-                # Fixed project convention: HI is a health indicator aligned with RUL.
                 hi_target = y
-                if (not fixed_hi_mode) and self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
+                supervision_mode = str(self.config.hi_supervision_mode).lower()
+                if (
+                    (not fixed_hi_mode)
+                    and supervision_mode == "direct"
+                    and self.config.hi_supervision_weight > 0
+                    and out.get("hi") is not None
+                ):
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
-                if (not fixed_hi_mode) and self.config.hi_rank_weight > 0 and out.get("hi") is not None:
-                    y_flat = hi_target.view(-1)
-                    hi_flat = out["hi"].view(-1)
-                    pair_idx = torch.randperm(y_flat.numel(), device=self.device)
-                    margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
-                    hi_rank = torch.nn.functional.softplus(-margin).mean()
+                if (not fixed_hi_mode) and self.config.hi_rank_weight > 0 and out.get("hi_temporal") is not None:
+                    hi_temporal_rank = out["hi_temporal"].squeeze(-1)
+                    if hi_temporal_rank.size(1) > 1:
+                        # Early windows should be at least as healthy as late windows.
+                        hi_rank = torch.nn.functional.softplus(
+                            hi_temporal_rank[:, -1] - hi_temporal_rank[:, 0]
+                        ).mean()
                 if (not fixed_hi_mode) and self.config.hi_variance_weight > 0 and out.get("hi") is not None:
                     # Penalize low variance directly on bounded HI output to
                     # prevent near-constant HI collapse.
@@ -238,6 +243,10 @@ class Trainer:
                     and out.get("residual_component") is not None
                 ):
                     residual_penalty = out["residual_component"].abs().mean()
+                hi_monotonic = torch.tensor(0.0, device=self.device)
+                if (not fixed_hi_mode) and hi_temporal is not None and hi_temporal.size(1) > 1:
+                    hi_seq = hi_temporal.squeeze(-1)
+                    hi_monotonic = torch.relu(hi_seq[:, 1:] - hi_seq[:, :-1]).mean()
                 if (not fixed_hi_mode) and self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
                     smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
                     hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
@@ -248,7 +257,7 @@ class Trainer:
                     + self.config.hi_supervision_weight * hi_sup
                     + self.config.hi_rank_weight * hi_rank
                     + self.config.hi_variance_weight * hi_var_pen
-                    + self.config.hi_smoothness_weight * hi_smoothness
+                    + self.config.hi_smoothness_weight * (hi_smoothness + hi_monotonic)
                     + self.config.residual_regularization_weight * residual_penalty
                 )
 
@@ -300,6 +309,7 @@ class Trainer:
                         attn_head_bias_std_sum += float(attn_debug["head_bias_std"].item())
                         attn_degradation_bias_std_sum += float(attn_debug["degradation_bias_std"].item())
                         attn_delta_sum += float(attn_debug["attn_delta_l1"].item())
+                        attn_entropy_sum += float(attn_debug["attn_entropy"].item())
                     attn_batches += 1
                     attn_2d = attn.detach().mean(dim=(0, 1)).cpu().numpy().astype(np.float32)
                     attn_map_sum = attn_2d if attn_map_sum is None else (attn_map_sum + attn_2d)
@@ -376,6 +386,7 @@ class Trainer:
             "head_bias_std": attn_head_bias_std_sum / max(1, attn_batches),
             "degradation_bias_std": attn_degradation_bias_std_sum / max(1, attn_batches),
             "attn_delta_l1": attn_delta_sum / max(1, attn_batches),
+            "attn_entropy": attn_entropy_sum / max(1, attn_batches),
             "num_batches_with_attention": float(attn_batches),
         }
 
@@ -461,6 +472,7 @@ class Trainer:
         hi_true_corr = float(np.corrcoef(hi, true)[0, 1]) if len(hi) > 1 else float("nan")
         hi_true_degradation_corr = float(np.corrcoef(hi, 1.0 - true)[0, 1]) if len(hi) > 1 else float("nan")
         hi_pred_corr = float(np.corrcoef(hi, pred)[0, 1]) if len(hi) > 1 else float("nan")
+        pred_true_corr = float(np.corrcoef(pred, true)[0, 1]) if len(hi) > 1 else float("nan")
         regression_stats["hi_mean"] = float(np.mean(hi)) if len(hi) else float("nan")
         regression_stats["hi_std"] = float(np.std(hi)) if len(hi) else float("nan")
         regression_stats["hi_true_corr"] = hi_true_corr if np.isfinite(hi_true_corr) else float("nan")
@@ -468,6 +480,7 @@ class Trainer:
             hi_true_degradation_corr if np.isfinite(hi_true_degradation_corr) else float("nan")
         )
         regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
+        regression_stats["pred_true_corr"] = pred_true_corr if np.isfinite(pred_true_corr) else float("nan")
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -498,6 +511,7 @@ class Trainer:
                 "%s epoch %03d prediction stats | rmse %.6f | mae %.6f | bias %+.6f | "
                 "pred mean/std %.6f/%.6f | true mean/std %.6f/%.6f | hi mean/std %.6f/%.6f | "
                 "hi-true(RUL) corr %.4f | hi-true(degradation) corr %.4f | hi-pred corr %.4f"
+                " | pred-true corr %.4f"
             ),
             phase.title(),
             epoch,
@@ -513,6 +527,7 @@ class Trainer:
             regression_stats["hi_true_corr"],
             regression_stats["hi_true_degradation_corr"],
             regression_stats["hi_pred_corr"],
+            regression_stats["pred_true_corr"],
         )
         return regression_stats
 
@@ -619,9 +634,9 @@ class Trainer:
             self.logger.info(
                 (
                     "Epoch %03d/%03d attention stats | train min/max %.5f/%.5f mean/std %.5f/%.5f "
-                    "cond_hi_std %.5f head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f | "
+                    "cond_hi_std %.5f head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f entropy %.6f | "
                     "valid min/max %.5f/%.5f mean/std %.5f/%.5f cond_hi_std %.5f "
-                    "head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f"
+                    "head_bias_std %.5f degr_bias_std %.5f delta_l1 %.6f entropy %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -633,6 +648,7 @@ class Trainer:
                 tr_attn_stats["head_bias_std"],
                 tr_attn_stats["degradation_bias_std"],
                 tr_attn_stats["attn_delta_l1"],
+                tr_attn_stats["attn_entropy"],
                 va_attn_stats["attn_min"],
                 va_attn_stats["attn_max"],
                 va_attn_stats["attn_mean"],
@@ -641,6 +657,7 @@ class Trainer:
                 va_attn_stats["head_bias_std"],
                 va_attn_stats["degradation_bias_std"],
                 va_attn_stats["attn_delta_l1"],
+                va_attn_stats["attn_entropy"],
             )
 
             improved_total = va["valid_total"] < self.best_val_total
