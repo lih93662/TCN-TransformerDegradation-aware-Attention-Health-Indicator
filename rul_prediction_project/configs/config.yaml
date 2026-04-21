@@ -89,3 +89,4 @@ evaluation:
   attention_num_samples: 3
   max_attention_samples: 500
   skip_attention_export: false
+  phm_exp_clip: 40.0

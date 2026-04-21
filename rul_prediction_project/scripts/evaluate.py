@@ -94,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         help="Skip attention averaging/plots to reduce memory use.",
     )
     parser.add_argument(
+        "--phm-exp-clip",
+        type=float,
+        default=None,
+        help="PHM exponential clip for stable reporting (default: evaluation.phm_exp_clip or 40).",
+    )
+    parser.add_argument(
         "--enable-linear-calibration",
         action="store_true",
         help="Enable post-hoc linear calibration fitted on validation predictions (default: disabled).",
@@ -258,6 +264,11 @@ def main() -> None:
         if args.max_attention_samples is not None
         else (None if cfg_max_attention is None else int(cfg_max_attention))
     )
+    phm_exp_clip = (
+        float(args.phm_exp_clip)
+        if args.phm_exp_clip is not None
+        else float(eval_cfg.get("phm_exp_clip", 40.0))
+    )
     skip_attention_export = bool(eval_cfg.get("skip_attention_export", False)) or bool(args.skip_attention_export)
     logger.info(
         "Attention export settings | skip=%s | max_attention_samples=%s | streaming_average=%s",
@@ -298,11 +309,19 @@ def main() -> None:
     y_pred_cal = (calibration["a"] * y_pred + calibration["b"]).astype(np.float32)
 
     norm_metrics = compute_regression_metrics(torch.from_numpy(y_pred), torch.from_numpy(y_true))
-    norm_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred), torch.from_numpy(y_true))
+    norm_metrics["phm_score"] = phm2012_score(
+        torch.from_numpy(y_pred),
+        torch.from_numpy(y_true),
+        exp_clip=phm_exp_clip,
+    )
     norm_metrics["num_samples"] = int(len(y_true))
     norm_metrics["pred_true_std_ratio"] = norm_metrics["pred_std"] / max(norm_metrics["true_std"], 1e-8)
     norm_metrics_cal = compute_regression_metrics(torch.from_numpy(y_pred_cal), torch.from_numpy(y_true))
-    norm_metrics_cal["phm_score"] = phm2012_score(torch.from_numpy(y_pred_cal), torch.from_numpy(y_true))
+    norm_metrics_cal["phm_score"] = phm2012_score(
+        torch.from_numpy(y_pred_cal),
+        torch.from_numpy(y_true),
+        exp_clip=phm_exp_clip,
+    )
     norm_metrics_cal["num_samples"] = int(len(y_true))
     norm_metrics_cal["pred_true_std_ratio"] = norm_metrics_cal["pred_std"] / max(norm_metrics_cal["true_std"], 1e-8)
 
@@ -311,11 +330,19 @@ def main() -> None:
     y_pred_raw = y_pred * target_scale
     y_pred_raw_cal = y_pred_cal * target_scale
     raw_metrics = compute_regression_metrics(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
-    raw_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
+    raw_metrics["phm_score"] = phm2012_score(
+        torch.from_numpy(y_pred_raw),
+        torch.from_numpy(y_true_raw),
+        exp_clip=phm_exp_clip,
+    )
     raw_metrics["target_scale"] = target_scale
     raw_metrics["pred_true_std_ratio"] = raw_metrics["pred_std"] / max(raw_metrics["true_std"], 1e-8)
     raw_metrics_cal = compute_regression_metrics(torch.from_numpy(y_pred_raw_cal), torch.from_numpy(y_true_raw))
-    raw_metrics_cal["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw_cal), torch.from_numpy(y_true_raw))
+    raw_metrics_cal["phm_score"] = phm2012_score(
+        torch.from_numpy(y_pred_raw_cal),
+        torch.from_numpy(y_true_raw),
+        exp_clip=phm_exp_clip,
+    )
     raw_metrics_cal["target_scale"] = target_scale
     raw_metrics_cal["pred_true_std_ratio"] = raw_metrics_cal["pred_std"] / max(raw_metrics_cal["true_std"], 1e-8)
 
@@ -416,6 +443,7 @@ def main() -> None:
             "raw": raw_metrics,
             "raw_calibrated": raw_metrics_cal,
             "calibration": calibration,
+            "phm_exp_clip": phm_exp_clip,
         },
     )
     save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
