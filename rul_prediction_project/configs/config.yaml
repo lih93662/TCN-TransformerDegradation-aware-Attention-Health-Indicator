@@ -29,6 +29,8 @@ data:
   train_balance_seed: null  # falls back to experiment seed
 
 model:
+  use_tcn: true
+  use_transformer: true
   backbone_variant: "tcn_transformer"   # tcn_transformer | tcn_only | transformer_only
   tcn_channels: 64
   tcn_kernel_size: 3

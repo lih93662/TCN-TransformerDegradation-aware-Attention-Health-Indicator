@@ -63,6 +63,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_backbone_variant(model_cfg_raw: Dict) -> str:
+    """Resolve backbone variant from explicit flags or legacy backbone_variant field."""
+
+    use_tcn = model_cfg_raw.get("use_tcn")
+    use_transformer = model_cfg_raw.get("use_transformer")
+    if use_tcn is None and use_transformer is None:
+        return str(model_cfg_raw.get("backbone_variant", "tcn_transformer"))
+
+    use_tcn = bool(True if use_tcn is None else use_tcn)
+    use_transformer = bool(True if use_transformer is None else use_transformer)
+    if use_tcn and use_transformer:
+        return "tcn_transformer"
+    if use_tcn:
+        return "tcn_only"
+    if use_transformer:
+        return "transformer_only"
+    raise ValueError("Invalid model flags: at least one of model.use_tcn/model.use_transformer must be true.")
+
+
 def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
     model_cfg_raw = cfg["model"]
     return ModelConfig(
@@ -75,7 +94,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         transformer_layers=int(model_cfg_raw["transformer_layers"]),
         transformer_ffn_dim=int(model_cfg_raw["transformer_ffn_dim"]),
         dropout=float(model_cfg_raw["dropout"]),
-        backbone_variant=str(model_cfg_raw.get("backbone_variant", "tcn_transformer")),
+        backbone_variant=resolve_backbone_variant(model_cfg_raw),
         use_hi=bool(model_cfg_raw.get("use_hi", True)),
         use_fixed_hi=bool(model_cfg_raw.get("use_fixed_hi", False)),
         hi_input_source=str(model_cfg_raw.get("hi_input_source", "tcn")),

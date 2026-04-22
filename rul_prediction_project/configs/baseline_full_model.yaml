@@ -1,0 +1,10 @@
+base_config: ./config.yaml
+
+experiment:
+  tag: baseline_full_model
+
+model:
+  use_tcn: true
+  use_transformer: true
+  use_attention: true
+  use_hi: true

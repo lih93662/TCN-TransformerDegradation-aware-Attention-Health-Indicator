@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -52,6 +53,7 @@ from src.visualization import (
     plot_residual_vs_target,
     plot_rul_curve,
     plot_single_bearing_prediction,
+    plot_training_loss,
 )
 
 def _safe_load_checkpoint(path: Path, device: torch.device) -> Dict:
@@ -114,6 +116,21 @@ def _build_model(
     checkpoint_head_variant: str | None = None,
 ) -> HybridRULModel:
     m = cfg["model"]
+    use_tcn = m.get("use_tcn")
+    use_transformer = m.get("use_transformer")
+    if use_tcn is None and use_transformer is None:
+        backbone_variant = str(m.get("backbone_variant", "tcn_transformer"))
+    else:
+        use_tcn = bool(True if use_tcn is None else use_tcn)
+        use_transformer = bool(True if use_transformer is None else use_transformer)
+        if use_tcn and use_transformer:
+            backbone_variant = "tcn_transformer"
+        elif use_tcn:
+            backbone_variant = "tcn_only"
+        elif use_transformer:
+            backbone_variant = "transformer_only"
+        else:
+            raise ValueError("At least one of model.use_tcn/model.use_transformer must be true.")
     model_cfg = ModelConfig(
         sensor_dim=sensor_dim,
         tcn_channels=int(m["tcn_channels"]),
@@ -124,7 +141,7 @@ def _build_model(
         transformer_layers=int(m["transformer_layers"]),
         transformer_ffn_dim=int(m["transformer_ffn_dim"]),
         dropout=float(m["dropout"]),
-        backbone_variant=str(m.get("backbone_variant", "tcn_transformer")),
+        backbone_variant=backbone_variant,
         use_hi=bool(m.get("use_hi", True)),
         use_fixed_hi=bool(m.get("use_fixed_hi", False)),
         hi_input_source=str(m.get("hi_input_source", "tcn")),
@@ -171,6 +188,15 @@ def _attention_average(attention_maps: List[np.ndarray], window_size: int) -> np
     if running_sum is None or count == 0:
         return np.eye(window_size, dtype=np.float32)
     return running_sum / float(count)
+
+
+def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=np.float32).reshape(-1)
+    b = np.asarray(b, dtype=np.float32).reshape(-1)
+    if a.size < 2 or b.size < 2:
+        return float("nan")
+    corr = float(np.corrcoef(a, b)[0, 1])
+    return corr if np.isfinite(corr) else float("nan")
 
 def _figure_path(figures_dir: Path, filename: str) -> Path:
     path = figures_dir / filename
@@ -411,6 +437,17 @@ def main() -> None:
     hi_summary["corr_hi_true_rul"] = float(corr) if np.isfinite(corr) else float("nan")
     hi_summary["corr_hi_true_degradation"] = float(corr_deg) if np.isfinite(corr_deg) else float("nan")
     hi_summary["corr_hi_pred_rul"] = float(corr_pred) if np.isfinite(corr_pred) else float("nan")
+    pred_true_corr = _safe_corr(y_pred, y_true)
+    pred_hi_corr = _safe_corr(y_pred, result.hi)
+    hi_true_corr = _safe_corr(result.hi, y_true)
+    pred_std = float(np.std(y_pred))
+    hi_std = float(np.std(result.hi))
+    shortcut_warning = bool(np.isfinite(pred_hi_corr) and pred_hi_corr > 0.95)
+    hi_collapse_warning = bool(np.isfinite(hi_std) and hi_std < 0.01)
+    if shortcut_warning:
+        logger.warning("Possible HI shortcut detected: corr(pred, hi)=%.4f (>0.95)", pred_hi_corr)
+    if hi_collapse_warning:
+        logger.warning("Possible HI collapse detected: std(hi)=%.6f (<0.01)", hi_std)
 
     scatter_rows = []
     for i, (bid, yt, yp, yp_cal, hi) in enumerate(zip(result.ids, y_true_raw, y_pred_raw, y_pred_raw_cal, result.hi)):
@@ -426,13 +463,42 @@ def main() -> None:
                 "health_indicator": float(hi),
             }
         )
-    for bearing_id, arrays in list(grouped.items())[:3]:
+    for bearing_id, arrays in grouped.items():
         plot_single_bearing_prediction(
             bearing_id,
             arrays["y_true"],
             arrays["y_pred"],
             _figure_path(figures_dir, f"bearing_{bearing_id}_timeseries.png"),
         )
+        plot_hi_curve(
+            arrays["hi"],
+            _figure_path(figures_dir, f"bearing_{bearing_id}_hi_curve.png"),
+        )
+
+    paper_dir = eval_dir / "paper_artifacts"
+    paper_figures_dir = paper_dir / "figures"
+    paper_tables_dir = paper_dir / "tables"
+    paper_figures_dir.mkdir(parents=True, exist_ok=True)
+    paper_tables_dir.mkdir(parents=True, exist_ok=True)
+    for bearing_id, arrays in grouped.items():
+        plot_single_bearing_prediction(
+            bearing_id,
+            arrays["y_true"],
+            arrays["y_pred"],
+            _figure_path(paper_figures_dir, f"rul_curve_{bearing_id}.png"),
+        )
+        plot_hi_curve(arrays["hi"], _figure_path(paper_figures_dir, f"hi_curve_{bearing_id}.png"))
+    plot_prediction_scatter(y_true_raw, y_pred_raw, _figure_path(paper_figures_dir, "pred_vs_true_scatter.png"))
+    if not skip_attention_export:
+        plot_attention(attention_mean, _figure_path(paper_figures_dir, "attention_heatmap_mean.png"))
+
+    history_path = paths["run_logs"] / "history.json"
+    if history_path.exists():
+        with history_path.open("r", encoding="utf-8") as f:
+            history_payload = json.load(f)
+        history = history_payload.get("history", [])
+        if history:
+            plot_training_loss(history, _figure_path(paper_figures_dir, "train_valid_loss.png"))
 
     save_json(
         tables_dir / "metrics.json",
@@ -445,11 +511,89 @@ def main() -> None:
             "raw_calibrated": raw_metrics_cal,
             "calibration": calibration,
             "phm_exp_clip": phm_exp_clip,
+            "diagnostics": {
+                "corr_pred_true_rul": pred_true_corr,
+                "corr_pred_hi": pred_hi_corr,
+                "corr_hi_true_rul": hi_true_corr,
+                "std_pred": pred_std,
+                "std_hi": hi_std,
+                "warning_shortcut": shortcut_warning,
+                "warning_hi_collapse": hi_collapse_warning,
+            },
         },
     )
     save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
+    save_csv_rows(tables_dir / "per_bearing_results.csv", grouped_rows_raw)
     save_csv_rows(tables_dir / "prediction_scatter_raw.csv", scatter_rows)
     save_json(tables_dir / "hi_summary.json", hi_summary)
+    main_rows = [
+        {
+            "model": run_name,
+            "RMSE": raw_metrics["rmse"],
+            "MAE": raw_metrics["mae"],
+            "R2": raw_metrics["r2"],
+            "PHM": raw_metrics["phm_score"],
+        }
+    ]
+    save_csv_rows(tables_dir / "main_results.csv", main_rows)
+    save_csv_rows(paper_tables_dir / "main_results.csv", main_rows)
+    save_csv_rows(paper_tables_dir / "per_bearing_results.csv", grouped_rows_raw)
+
+    main_md = [
+        "| model | RMSE | MAE | R2 | PHM |",
+        "|---|---:|---:|---:|---:|",
+        f"| {run_name} | {raw_metrics['rmse']:.6f} | {raw_metrics['mae']:.6f} | {raw_metrics['r2']:.6f} | {raw_metrics['phm_score']:.6f} |",
+    ]
+    (tables_dir / "main_results.md").write_text("\n".join(main_md) + "\n", encoding="utf-8")
+    (paper_tables_dir / "main_results.md").write_text("\n".join(main_md) + "\n", encoding="utf-8")
+
+    ablation_csv = paths["results"] / "ablation_results.csv"
+    ablation_md = paths["results"] / "ablation_results.md"
+    if ablation_csv.exists():
+        (paper_tables_dir / "ablation_results.csv").write_text(ablation_csv.read_text(encoding="utf-8"), encoding="utf-8")
+    if ablation_md.exists():
+        (paper_tables_dir / "ablation_results.md").write_text(ablation_md.read_text(encoding="utf-8"), encoding="utf-8")
+
+    summary_lines = [
+        "# Paper Summary",
+        "",
+        "## Dataset split info",
+        f"- split: {args.split}",
+        f"- valid_ratio: {data_cfg.get('valid_ratio')}",
+        f"- valid_bearing_ids: {data_cfg.get('valid_bearing_ids')}",
+        "",
+        "## Model config",
+        f"- use_tcn: {cfg['model'].get('use_tcn', True)}",
+        f"- use_transformer: {cfg['model'].get('use_transformer', True)}",
+        f"- use_attention: {cfg['model'].get('use_attention', True)}",
+        f"- use_hi: {cfg['model'].get('use_hi', True)}",
+        f"- use_hi_in_rul_head: {cfg['model'].get('use_hi_in_rul_head', False)}",
+        "",
+        "## Main results",
+        f"- RMSE: {raw_metrics['rmse']:.6f}",
+        f"- MAE: {raw_metrics['mae']:.6f}",
+        f"- R2: {raw_metrics['r2']:.6f}",
+        f"- PHM: {raw_metrics['phm_score']:.6f}",
+        "",
+        "## Ablation results",
+        f"- source: {ablation_csv if ablation_csv.exists() else 'not available yet'}",
+        "",
+        "## Key observations",
+        f"- corr(pred, true_rul) = {pred_true_corr:.4f}",
+        f"- corr(pred, hi) = {pred_hi_corr:.4f}",
+        f"- corr(hi, true_rul) = {hi_true_corr:.4f}",
+        f"- std(pred) = {pred_std:.6f}",
+        f"- std(hi) = {hi_std:.6f}",
+        f"- shortcut warning: {'YES' if shortcut_warning else 'NO'}",
+        f"- HI collapse warning: {'YES' if hi_collapse_warning else 'NO'}",
+        "",
+        "## Figure paths",
+        f"- figures root: {paper_figures_dir}",
+        f"- scatter: {paper_figures_dir / 'pred_vs_true_scatter.png'}",
+        f"- attention mean heatmap: {paper_figures_dir / 'attention_heatmap_mean.png'}",
+        f"- loss curve: {paper_figures_dir / 'train_valid_loss.png'}",
+    ]
+    (paper_dir / "summary.md").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
     logger.info("TEST RESULTS (%s, normalized scale)", args.split.upper())
     logger.info(
@@ -473,6 +617,14 @@ def main() -> None:
     logger.info("Evaluation raw metrics: %s", raw_metrics)
     logger.info("Evaluation raw metrics (calibrated): %s", raw_metrics_cal)
     logger.info("HI summary: %s", hi_summary)
+    logger.info(
+        "Diagnostics | corr(pred,true_rul)=%.4f | corr(pred,hi)=%.4f | corr(hi,true_rul)=%.4f | std(pred)=%.6f | std(hi)=%.6f",
+        pred_true_corr,
+        pred_hi_corr,
+        hi_true_corr,
+        pred_std,
+        hi_std,
+    )
     logger.info("Saved evaluation artifacts under %s", eval_dir)
 
 

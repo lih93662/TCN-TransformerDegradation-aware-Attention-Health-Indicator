@@ -467,6 +467,12 @@ class Trainer:
         )
         regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
         regression_stats["pred_true_corr"] = pred_true_corr if np.isfinite(pred_true_corr) else float("nan")
+        regression_stats["warning_shortcut"] = bool(
+            np.isfinite(regression_stats["hi_pred_corr"]) and regression_stats["hi_pred_corr"] > 0.95
+        )
+        regression_stats["warning_hi_collapse"] = bool(
+            np.isfinite(regression_stats["hi_std"]) and regression_stats["hi_std"] < 0.01
+        )
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -490,6 +496,20 @@ class Trainer:
                 phase,
                 epoch,
                 regression_stats["pred_std"],
+            )
+        if regression_stats["warning_shortcut"]:
+            self.logger.warning(
+                "Possible shortcut for %s epoch %03d: corr(pred, hi)=%.4f (>0.95)",
+                phase,
+                epoch,
+                regression_stats["hi_pred_corr"],
+            )
+        if regression_stats["warning_hi_collapse"]:
+            self.logger.warning(
+                "HI collapse for %s epoch %03d: std(hi)=%.6f (<0.01)",
+                phase,
+                epoch,
+                regression_stats["hi_std"],
             )
 
         self.logger.info(
