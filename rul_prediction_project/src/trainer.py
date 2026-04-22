@@ -49,6 +49,7 @@ class TrainerConfig:
     hi_variance_weight: float = 0.05
     hi_variance_floor: float = 0.05
     hi_smoothness_weight: float = 0.01
+    corr_alignment_weight: float = 0.1
     residual_regularization_weight: float = 0.0
     hi_supervision_mode: str = "weak"
     hi_target_mode: str = "health"
@@ -242,6 +243,7 @@ class Trainer:
                     + self.config.hi_monotonic_weight * hi_monotonic
                     + self.config.hi_variance_weight * hi_var_pen
                     + self.config.hi_smoothness_weight * hi_smoothness
+                    + self.config.corr_alignment_weight * loss_out.corr_penalty
                     + self.config.residual_regularization_weight * residual_penalty
                 )
 

@@ -157,6 +157,7 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.05)),
         hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.05)),
         hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.01)),
+        corr_alignment_weight=float(train_cfg_raw.get("corr_alignment_weight", 0.1)),
         residual_regularization_weight=float(train_cfg_raw.get("residual_regularization_weight", 0.0)),
         hi_supervision_mode=str(train_cfg_raw.get("hi_supervision_mode", "weak")),
         hi_target_mode=str(train_cfg_raw.get("hi_target_mode", "degradation")),
