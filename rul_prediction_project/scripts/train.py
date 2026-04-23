@@ -161,6 +161,7 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         residual_regularization_weight=float(train_cfg_raw.get("residual_regularization_weight", 0.0)),
         hi_supervision_mode=str(train_cfg_raw.get("hi_supervision_mode", "weak")),
         hi_target_mode=str(train_cfg_raw.get("hi_target_mode", "degradation")),
+        auto_flip_negative_corr=bool(train_cfg_raw.get("auto_flip_negative_corr", True)),
     )
 
 

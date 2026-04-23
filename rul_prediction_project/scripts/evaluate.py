@@ -282,7 +282,9 @@ def main() -> None:
     )
     logger.info("Checkpoint head variant detected: %s", checkpoint_head_variant)
     load_model_state_strict(model, payload)
+    setattr(model, "output_flip", bool(payload.get("output_flip", False)))
     logger.info("Loaded checkpoint %s from epoch %s", ckpt, payload.get("epoch", "unknown"))
+    logger.info("Output direction flip active: %s", bool(getattr(model, "output_flip", False)))
 
     loader = DataLoader(split_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
     cfg_max_attention = eval_cfg.get("max_attention_samples")

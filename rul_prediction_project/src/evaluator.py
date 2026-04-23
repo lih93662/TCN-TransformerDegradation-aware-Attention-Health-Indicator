@@ -53,6 +53,8 @@ def evaluate_model(
             fixed_hi_mode = bool(getattr(getattr(model, "cfg", None), "use_fixed_hi", False))
             out = model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
             p = out["pred"]
+            if bool(getattr(model, "output_flip", False)):
+                p = 1.0 - p
             h = out["hi"]
 
             preds.append(p.cpu().numpy())

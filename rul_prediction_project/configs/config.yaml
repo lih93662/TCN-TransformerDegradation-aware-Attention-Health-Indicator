@@ -88,6 +88,7 @@ train:
   hi_variance_floor: 0.05
   hi_smoothness_weight: 0.01
   corr_alignment_weight: 0.1
+  auto_flip_negative_corr: true
   hi_supervision_mode: "weak"  # weak | direct
   residual_regularization_weight: 0.0
   hi_target_mode: "health"  # fixed convention: higher HI means healthier / larger RUL

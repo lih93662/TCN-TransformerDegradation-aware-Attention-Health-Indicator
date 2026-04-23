@@ -54,6 +54,7 @@ class TrainerConfig:
     hi_supervision_mode: str = "weak"
     hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
+    auto_flip_negative_corr: bool = True
 
 
 class Trainer:
@@ -114,6 +115,11 @@ class Trainer:
         self.best_val_rmse = float("inf")
         self.best_epoch = 0
         self.no_improve_epochs = 0
+        self.output_flip = False
+
+    def _align_pred(self, pred: torch.Tensor) -> torch.Tensor:
+        """Apply optional direction correction (pred := 1 - pred)."""
+        return (1.0 - pred) if self.output_flip else pred
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
         return DataLoader(
@@ -194,7 +200,8 @@ class Trainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
-                loss_out = self.criterion(out["pred"], y)
+                pred_aligned = self._align_pred(out["pred"])
+                loss_out = self.criterion(pred_aligned, y)
                 hi_sup = torch.tensor(0.0, device=self.device)
                 hi_rank = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
@@ -397,7 +404,8 @@ class Trainer:
                 y = batch["y"].to(self.device)
                 fixed_hi_mode = bool(getattr(getattr(self.model, "cfg", None), "use_fixed_hi", False))
                 out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
-                preds.append(out["pred"].detach().cpu().numpy().reshape(-1))
+                pred_aligned = self._align_pred(out["pred"])
+                preds.append(pred_aligned.detach().cpu().numpy().reshape(-1))
                 trues.append(y.detach().cpu().numpy().reshape(-1))
                 his.append(out["hi"].detach().cpu().numpy().reshape(-1))
                 ids.extend(list(batch["id"]))
@@ -548,6 +556,7 @@ class Trainer:
             "scheduler_state": self.scheduler.state_dict(),
             "best_valid_total": valid_total,
             "best_valid_rmse": valid_rmse,
+            "output_flip": bool(self.output_flip),
             "config": self.config.__dict__,
         }
         torch.save(payload, self.checkpoint_path)
@@ -576,6 +585,17 @@ class Trainer:
                 np.save(self.attn_dir / f"epoch_{epoch:03d}_valid.npy", va_attn_avg)
 
             valid_pred_stats = self._save_prediction_debug(epoch, "valid", valid_loader)
+            if (
+                bool(self.config.auto_flip_negative_corr)
+                and (not self.output_flip)
+                and float(valid_pred_stats.get("pred_true_corr", 0.0)) < 0.0
+            ):
+                self.output_flip = True
+                self.logger.warning(
+                    "Detected negative validation corr(pred,true)=%.4f at epoch %03d; enabling output flip (pred := 1-pred).",
+                    float(valid_pred_stats.get("pred_true_corr", float("nan"))),
+                    epoch,
+                )
             # Use full-validation aggregation metrics (not batch-averaged surrogates)
             # for scheduler and early-stopping decisions.
             va["valid_rmse"] = float(valid_pred_stats.get("rmse", va["valid_rmse"]))
@@ -715,6 +735,7 @@ class Trainer:
             except TypeError:
                 payload = torch.load(self.checkpoint_path, map_location=self.device)
             load_model_state_strict(self.model, payload)
+            self.output_flip = bool(payload.get("output_flip", False))
             self.logger.info("Loaded best checkpoint from epoch %s", payload.get("epoch", "<unknown>"))
 
         test_loader = self._make_loader(test_dataset, shuffle=False)
