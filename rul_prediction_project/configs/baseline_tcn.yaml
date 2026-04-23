@@ -1,0 +1,10 @@
+base_config: ./config.yaml
+
+experiment:
+  tag: baseline_tcn_only
+
+model:
+  use_tcn: true
+  use_transformer: false
+  use_attention: false
+  use_hi: false

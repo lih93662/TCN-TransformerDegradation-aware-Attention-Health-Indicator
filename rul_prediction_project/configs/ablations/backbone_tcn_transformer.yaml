@@ -1,0 +1,7 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: ablation_backbone_tcn_transformer
+
+model:
+  backbone_variant: "tcn_transformer"

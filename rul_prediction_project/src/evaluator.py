@@ -31,6 +31,8 @@ def evaluate_model(
     model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
+    max_attention_samples: int | None = None,
+    skip_attention_export: bool = False,
 ) -> EvalResult:
     """Run model inference and compute regression/diagnostic metrics."""
 
@@ -42,12 +44,17 @@ def evaluate_model(
     attention_maps: List[np.ndarray] = []
     temporal_attention: List[np.ndarray] = []
 
+    max_attention = None if max_attention_samples is None else max(0, int(max_attention_samples))
+
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            out = model(x)
+            fixed_hi_mode = bool(getattr(getattr(model, "cfg", None), "use_fixed_hi", False))
+            out = model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
             p = out["pred"]
+            if bool(getattr(model, "output_flip", False)):
+                p = 1.0 - p
             h = out["hi"]
 
             preds.append(p.cpu().numpy())
@@ -55,10 +62,16 @@ def evaluate_model(
             his.append(h.cpu().numpy())
             ids.extend(batch["id"])
 
-            if out.get("attn_map") is not None:
-                attention_maps.extend(out["attn_map"].detach().cpu().numpy())
-            if out.get("temporal_attn") is not None:
-                temporal_attention.extend(out["temporal_attn"].detach().cpu().numpy())
+            if not skip_attention_export and out.get("attn_map") is not None:
+                batch_attn = out["attn_map"].detach().cpu().numpy()
+                remaining = None if max_attention is None else max_attention - len(attention_maps)
+                if remaining is None or remaining > 0:
+                    attention_maps.extend(batch_attn[:remaining] if remaining is not None else batch_attn)
+            if not skip_attention_export and out.get("temporal_attn") is not None:
+                batch_temporal = out["temporal_attn"].detach().cpu().numpy()
+                remaining_t = None if max_attention is None else max_attention - len(temporal_attention)
+                if remaining_t is None or remaining_t > 0:
+                    temporal_attention.extend(batch_temporal[:remaining_t] if remaining_t is not None else batch_temporal)
 
     y_pred = np.concatenate(preds, axis=0)
     y_true = np.concatenate(trues, axis=0)

@@ -1,7 +1,9 @@
 """Health Indicator (HI) module.
 
-The HI is derived from statistical descriptors over each sliding window and then
-mapped into [0, 1] by an MLP.
+HI can be computed from:
+- handcrafted statistical descriptors (`stats`)
+- learned temporal features from the TCN pathway (`tcn`)
+- hybrid concatenation of both (`hybrid`)
 """
 
 from __future__ import annotations
@@ -52,9 +54,28 @@ class HealthIndicatorNet(nn.Module):
         input_dim -> 32 -> 16 -> 1 -> sigmoid
     """
 
-    def __init__(self, sensor_dim: int):
+    def __init__(
+        self,
+        sensor_dim: int,
+        tcn_channels: int,
+        hi_input_source: str = "tcn",
+        output_temperature: float = 1.5,
+    ):
         super().__init__()
-        input_dim = sensor_dim * 4
+        self.hi_input_source = str(hi_input_source).lower()
+        if self.hi_input_source not in {"stats", "tcn", "hybrid"}:
+            raise ValueError(f"Unsupported hi_input_source: {hi_input_source}")
+
+        self.stats_dim = sensor_dim * 4
+        self.temporal_dim = tcn_channels * 3
+        if self.hi_input_source == "stats":
+            input_dim = self.stats_dim
+        elif self.hi_input_source == "tcn":
+            input_dim = self.temporal_dim
+        else:
+            input_dim = self.stats_dim + self.temporal_dim
+
+        self.feature_dim = input_dim
         self.extractor = StatisticalFeatureExtractor()
         self.norm = nn.LayerNorm(input_dim)
         self.mlp = nn.Sequential(
@@ -65,14 +86,50 @@ class HealthIndicatorNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(16, 1),
         )
+        self.temporal_head = nn.Linear(tcn_channels, 1)
+        self.temporal_blend_weight = 0.3
+        self.output_temperature = max(float(output_temperature), 1e-3)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return HI scalar and raw statistical feature embedding."""
+    def _extract_tcn_temporal_feat(self, tcn_seq: torch.Tensor | None, fallback_x: torch.Tensor) -> torch.Tensor:
+        if tcn_seq is None:
+            b = fallback_x.size(0)
+            return torch.zeros((b, self.temporal_dim), device=fallback_x.device, dtype=fallback_x.dtype)
+        if tcn_seq.ndim != 3:
+            raise ValueError(f"Expected 3D tcn_seq tensor (B,T,C), got {tuple(tcn_seq.shape)}")
+
+        mean_feat = tcn_seq.mean(dim=1)
+        std_feat = tcn_seq.std(dim=1, unbiased=False)
+        last_feat = tcn_seq[:, -1, :]
+        return torch.cat([mean_feat, std_feat, last_feat], dim=-1)
+
+    def _estimate_hi_sequence(self, tcn_seq: torch.Tensor | None) -> Tuple[torch.Tensor | None, torch.Tensor | None]:
+        if tcn_seq is None:
+            return None, None
+        hi_seq_logit = self.temporal_head(tcn_seq)
+        return torch.sigmoid(hi_seq_logit / self.output_temperature), hi_seq_logit
+
+    def forward(
+        self, x: torch.Tensor, tcn_seq: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
+        """Return HI scalar/features, temporal HI, temporal logits, and scalar pre-sigmoid logit."""
 
         stat_feat = self.extractor(x)
-        stat_feat_norm = self.norm(stat_feat)
-        hi_logit = self.mlp(stat_feat_norm)
-        hi_score = torch.sigmoid(hi_logit)
+        temporal_feat = self._extract_tcn_temporal_feat(tcn_seq, fallback_x=x)
+
+        if self.hi_input_source == "stats":
+            hi_feat = stat_feat
+        elif self.hi_input_source == "tcn":
+            hi_feat = temporal_feat
+        else:
+            hi_feat = torch.cat([temporal_feat, stat_feat], dim=-1)
+
+        hi_feat_norm = self.norm(hi_feat)
+        hi_logit = self.mlp(hi_feat_norm)
+        hi_temporal, hi_temporal_logit = self._estimate_hi_sequence(tcn_seq)
+        if hi_temporal_logit is not None:
+            end_logit = hi_temporal_logit[:, -1, :]
+            hi_logit = (1.0 - self.temporal_blend_weight) * hi_logit + self.temporal_blend_weight * end_logit
+        hi_score = torch.sigmoid(hi_logit / self.output_temperature)
 
         # Keep deterministic [0,1] output per window (no batch-wise normalization).
-        return hi_score, stat_feat
+        return hi_score, hi_feat, hi_temporal, hi_temporal_logit, hi_logit

@@ -6,14 +6,32 @@ experiment:
 
 data:
   dataset_root: "C:\\peng\\RULdata\\ieee-phm-2012-data-challenge-dataset-master\\phm-ieee-2012-data-challenge-dataset-master"
-  window_size: 64
-  stride: 2
+  window_size: 128
+  stride: 4
   max_rul: 0
   valid_ratio: 0.33
+  valid_bearing_ids: []  # optional explicit validation run ids
+  valid_split_variant: null  # optional preset: official_default | alt_bearing1_1 | alt_bearing1_2 | alt_bearing2_1 | alt_bearing3_1 | alt_bearing3_2
+  auto_valid_bearings_count: 2
+  max_auto_valid_tries: 16
+  min_valid_active_bins: 4
+  valid_skew_ratio_warn: 25.0
   sensor_dim: 2
   max_windows_per_bearing: 20000
+  scaler_mode: "standard"  # standard | robust
+  late_stage_threshold: 0.2
+  late_stage_oversample_factor: 1.0
+  balance_train_rul_bins: true
+  rul_bin_edges: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  train_balance_mode: "hybrid"  # oversample | downsample | hybrid
+  train_balance_target: "median"  # auto | min | median | max | custom
+  train_balance_custom_count: null
+  train_balance_seed: null  # falls back to experiment seed
 
 model:
+  use_tcn: true
+  use_transformer: true
+  backbone_variant: "tcn_transformer"   # tcn_transformer | tcn_only | transformer_only
   tcn_channels: 64
   tcn_kernel_size: 3
   tcn_dilations: [1, 2, 4, 8]
@@ -22,27 +40,61 @@ model:
   transformer_layers: 2
   transformer_ffn_dim: 256
   dropout: 0.3
+  use_hi: true
+  use_fixed_hi: false  # disable fixed-target HI shortcut
+  hi_input_source: "tcn"  # stats | tcn | hybrid
+  hi_output_temperature: 1.2
+  use_hi_in_rul_head: false  # keep HI auxiliary; do not feed HI to final RUL head
   use_attention: true
-  attention_temperature: 1.0
+  attention_use_hi_bias: true
+  attention_use_hi_logit: true
+  attention_use_temporal_gate: true
+  attention_use_recency_bias: true
+  attention_conditioning_gain: 3.0
+  attention_head_bias_gain: 2.0
+  attention_temperature: 0.7
   attention_recency_strength: 0.5
   head_hidden_dim: 32
+  model_head_variant: "auto"  # optional alias: auto | old | hi_driven
+  rul_head_mode: "plain"  # plain | concat_hi | hi_guided_residual
+  hi_residual_scale: 0.15  # smaller => HI trend dominates, features provide refinement
   output_activation: "identity"
 
 train:
-  lr: 0.0001
+  lr: 0.00003
   batch_size: 32
   epochs: 80
   num_workers: 0
-  early_stopping_patience: 5
+  early_stopping_patience: 8
+  early_stopping_min_epochs: 15
+  early_stopping_min_delta: 0.0005
   grad_clip_norm: 1.0
   scheduler_factor: 0.5
-  scheduler_patience: 3
+  scheduler_patience: 7
   weight_decay: 0.0
-  loss_name: "mse"
+  loss_name: "mse_mae"
+  use_mae_term: true
+  use_bias_regularization: false
   loss_mse_weight: 1.0
-  loss_mae_weight: 0.3
+  loss_mae_weight: 0.2
   huber_delta: 0.1
   bias_regularization_weight: 0.0
+  std_regularization_weight: 0.02
+  correlation_regularization_weight: 0.0
+  hi_supervision_weight: 0.0
+  hi_rank_weight: 0.0
+  hi_monotonic_weight: 0.1
+  hi_variance_weight: 0.05
+  hi_variance_floor: 0.05
+  hi_smoothness_weight: 0.01
+  corr_alignment_weight: 0.1
+  auto_flip_negative_corr: true
+  hi_supervision_mode: "weak"  # weak | direct
+  residual_regularization_weight: 0.0
+  hi_target_mode: "health"  # fixed convention: higher HI means healthier / larger RUL
 
 evaluation:
   attention_num_samples: 3
+  max_attention_samples: 500
+  skip_attention_export: false
+  phm_exp_clip: 40.0

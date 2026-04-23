@@ -1,143 +1,79 @@
-# PHM2012 RUL Prediction Research Project
+# PHM2012 RUL Prediction (SCI Q3/Q4 Minimal Paper Package)
 
-A research-oriented PyTorch implementation for Remaining Useful Life (RUL) prediction on the PHM 2012 IEEE Prognostics Challenge bearing dataset.
+This repository predicts **Remaining Useful Life (RUL)** for rolling bearings from vibration signals using a stable hybrid deep-learning pipeline.
 
-## Architecture
+## 1) What the model does
 
-This repository implements a modular hybrid model family:
+- Input: run-to-failure vibration windows from PHM2012 bearings.
+- Output: normalized and raw-scale RUL prediction.
+- Core model: **TCN + Transformer** backbone, optional **degradation-aware attention**, and optional **HI auxiliary branch**.
 
-- **Temporal Convolutional Network (TCN)** for local temporal features.
-- **Transformer Encoder** for global sequence modeling.
-- **Degradation-Aware Attention** with HI-conditioned temporal bias.
-- **Health Indicator (HI)** learned from statistical vibration features.
-- **Multimodal Attention Fusion** across time/frequency/deep/HI features.
+## 2) Dataset
 
-## Advanced Modules Added
+- Dataset: **PHM 2012 IEEE Prognostics Challenge bearing dataset** (run-to-failure).
+- Spliting/preprocessing are configured in `configs/config.yaml` and reused by all baselines/ablations.
+- Main preprocessing includes windowing, normalization/scaler fitting, and controlled train/valid/test split.
 
-- `src/features/time_frequency.py`
-  - STFT feature extraction
-  - CWT feature extraction
-  - Time-frequency fusion/projector utilities
-- `src/data/data_augmentation.py`
-  - Gaussian noise
-  - Time warping
-  - Window slicing
-  - Mixup
-- `src/models/multimodal_fusion.py`
-  - Attention-based multimodal fusion
-  - HI-conditioned modality weighting
-  - Fusion interpretability outputs
-- `scripts/online_prediction.py`
-  - Online/streaming RUL simulation pipeline
-- `scripts/run_benchmark.py`
-  - Multi-model benchmark experiments and CSV export
-- `scripts/generate_paper_figures.py`
-  - Publication-style figure generation under `outputs/paper_figures/`
+## 3) Key idea
 
-## Folder Structure
+- **TCN + Transformer** capture local + global temporal degradation cues.
+- **Degradation-aware attention** reweights temporal evidence.
+- **Health Indicator (HI)** is used as an **auxiliary signal only**.
+- Final default setup prevents HI shortcut to the RUL head (`use_hi_in_rul_head: false`).
 
-```text
-rul_prediction_project/
-├── src/
-│   ├── data/
-│   ├── features/
-│   ├── models/
-│   └── ...
-├── configs/
-├── scripts/
-├── outputs/
-│   ├── checkpoints/
-│   ├── figures/
-│   ├── logs/
-│   ├── paper_figures/
-│   └── results/
-├── requirements.txt
-└── README.md
-```
+## 4) How to run
 
-## Dataset
-
-Default absolute dataset path used by the project:
-
-```text
-C:\peng\RULdata\ieee-phm-2012-data-challenge-dataset-master\phm-ieee-2012-data-challenge-dataset-master
-```
-
-The dataset is read directly from this location. No dataset duplication is performed.
-
-## Training
+### Train
 
 ```bash
 python scripts/train.py --config configs/config.yaml
 ```
 
-Training diagnostics are exported to:
-- `outputs/logs/batch_loss_log.csv` (per-batch train/valid loss + LR)
-- `outputs/logs/attention_epoch_stats.csv` (attention min/max/mean/std by epoch)
-- `outputs/logs/attention_maps/epoch_*_{train|valid}.npy` (epoch-average attention maps)
-- training stability knobs in `configs/config.yaml`: `grad_clip_norm`, `scheduler_factor`, `scheduler_patience`, `weight_decay`
-
-## Evaluation
+### Evaluate
 
 ```bash
-python scripts/evaluate.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth
+python scripts/evaluate.py --config configs/config.yaml --checkpoint outputs/runs/<run_name>/checkpoints/best_model.pth
 ```
 
-## Benchmark
+### Baselines
 
 ```bash
-python scripts/run_benchmark.py --config configs/config.yaml
+python scripts/train.py --config configs/baseline_tcn.yaml
+python scripts/train.py --config configs/baseline_transformer.yaml
+python scripts/train.py --config configs/baseline_tcn_transformer.yaml
+python scripts/train.py --config configs/baseline_full_model.yaml
 ```
 
-Outputs:
-
-- `outputs/results/benchmark_results.csv`
-- `outputs/benchmark_results.png`
-
-## Online Prediction
-
-Single file:
+### Minimal ablation (A/B/C/D)
 
 ```bash
-python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_file /path/to/new_signal.csv
+python scripts/run_min_ablation.py
 ```
 
-PHM2012 directory (recommended):
+## 5) Where results are saved
 
-```bash
-python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_dir Full_Test_Set
-```
+For each run:
 
-Debug mode for constant-prediction diagnosis:
+- `outputs/runs/<run_name>/logs/`
+- `outputs/runs/<run_name>/checkpoints/`
+- `outputs/runs/<run_name>/results/`
 
-```bash
-python scripts/online_prediction.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth --input_dir Full_Test_Set --debug
-```
+Evaluation artifacts:
 
-Outputs are saved to `outputs/online_predictions/` per bearing:
-- `*_prediction.csv`
-- `*_rul_curve.png`
-- `*_hi_curve.png`
-- `*_attention_heatmap.png`
+- `outputs/runs/<run_name>/results/evaluation_test/figures/`
+- `outputs/runs/<run_name>/results/evaluation_test/tables/`
+- `outputs/runs/<run_name>/results/evaluation_test/paper_artifacts/`
+  - `figures/`
+  - `tables/`
+  - `summary.md`
 
-## Paper Figures
+Global paper tables:
 
-```bash
-python scripts/generate_paper_figures.py --config configs/config.yaml --checkpoint outputs/checkpoints/best_model.pth
-```
+- `outputs/results/ablation_results.csv`
+- `outputs/results/ablation_results.md`
 
-Generated files in `outputs/paper_figures/`:
+## 6) Reproducibility notes
 
-- `model_architecture.png`
-- `health_indicator_curve.png`
-- `rul_prediction_curve.png`
-- `attention_heatmap.png`
-- `sensor_importance.png`
-- `ablation_results.png`
-
-## Notes
-
-- GPU is automatically used if available.
-- Random seed setup is integrated.
-- Checkpoint saved as `outputs/checkpoints/best_model.pth`.
-- Metrics include RMSE, MAE, and PHM score.
+- Seed control is enabled (`experiment.seed`).
+- Deterministic PyTorch settings are enabled in `src/utils.py`.
+- Baselines and ablations reuse the same training/evaluation scripts to avoid code duplication.

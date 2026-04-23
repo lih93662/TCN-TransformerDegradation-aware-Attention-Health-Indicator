@@ -1,0 +1,11 @@
+base_config: ../config.yaml
+
+experiment:
+  tag: ablation_backbone_transformer_only
+
+model:
+  backbone_variant: "transformer_only"
+  use_attention: true
+  attention_use_hi_bias: false
+  attention_use_temporal_gate: false
+  attention_use_recency_bias: false
