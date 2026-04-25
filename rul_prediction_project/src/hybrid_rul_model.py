@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from .degradation_attention import DegradationAwareAttention
 from .health_indicator import HealthIndicatorNet
-from .rul_head import FusionMLP, HIGuidedResidualRULHead, RULHead
+from .rul_head import FusionMLP, RULHead
 from .tcn import TCNEncoder
 from .transformer_encoder import TransformerTemporalEncoder
 
@@ -41,8 +41,7 @@ class ModelConfig:
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
-    rul_head_mode: str = "hi_guided_residual"
-    hi_residual_scale: float = 0.3
+    rul_head_mode: str = "plain"
     output_activation: str = "identity"
 
 
@@ -103,30 +102,17 @@ class HybridRULModel(nn.Module):
             self.degradation_attention = None
             attention_dim = cfg.transformer_embed_dim
 
-        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + 1
+        # RUL prediction is feature-only by design (no HI-to-RUL direct path).
+        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim
         self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
         self.rul_head_mode = str(cfg.rul_head_mode).lower()
-        if self.rul_head_mode == "plain":
-            self.rul_head = RULHead(
-                input_dim=64,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-            )
-        elif self.rul_head_mode == "concat_hi":
-            self.rul_head = RULHead(
-                input_dim=65,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-            )
-        elif self.rul_head_mode == "hi_guided_residual":
-            self.rul_head = HIGuidedResidualRULHead(
-                feature_dim=64,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-                residual_scale=cfg.hi_residual_scale,
-            )
-        else:
+        if self.rul_head_mode != "plain":
             raise ValueError(f"Unsupported rul_head_mode: {cfg.rul_head_mode}")
+        self.rul_head = RULHead(
+            input_dim=64,
+            hidden_dim=cfg.head_hidden_dim,
+            activation=cfg.output_activation,
+        )
 
     def forward(self, x: torch.Tensor, fixed_hi: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
         # Stage 1/2 backbone variants
@@ -179,10 +165,8 @@ class HybridRULModel(nn.Module):
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
-            attn_hi = hi_logit if self.cfg.attention_use_hi_logit else hi_score
-            if not self.cfg.attention_use_hi_bias:
-                attn_hi = None
-            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, attn_hi)
+            # Enforce HI as auxiliary-only signal; attention remains feature-only.
+            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, None)
         else:
             da_feat = tr_pool
             temporal_attn = torch.full(
@@ -195,20 +179,13 @@ class HybridRULModel(nn.Module):
             attention_debug = None
 
         # Stage 4: Feature fusion
-        fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
+        fused = torch.cat([tcn_pool, tr_pool, da_feat], dim=-1)
         fused = self.fusion(fused)
 
         # Stage 5: Prediction
-        if self.rul_head_mode == "plain":
-            pred = self.rul_head(fused)
-            hi_component = torch.zeros_like(pred)
-            residual_component = pred
-        elif self.rul_head_mode == "concat_hi":
-            pred = self.rul_head(torch.cat([fused, hi_score], dim=-1))
-            hi_component = torch.zeros_like(pred)
-            residual_component = pred
-        else:
-            pred, hi_component, residual_component = self.rul_head(fused, hi_score)
+        pred = self.rul_head(fused)
+        hi_component = torch.zeros_like(pred)
+        residual_component = pred
 
         return {
             "pred": pred,

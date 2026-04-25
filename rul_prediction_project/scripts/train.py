@@ -90,8 +90,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
-        rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="hi_guided_residual"),
-        hi_residual_scale=float(model_cfg_raw.get("hi_residual_scale", 0.3)),
+        rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="plain"),
         output_activation=str(model_cfg_raw.get("output_activation", "identity")),
     )
 
@@ -131,8 +130,9 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         bias_regularization_weight=bias_weight,
         std_regularization_weight=float(train_cfg_raw.get("std_regularization_weight", 0.0)),
         correlation_regularization_weight=float(train_cfg_raw.get("correlation_regularization_weight", 0.0)),
-        hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.0)),
-        hi_rank_weight=float(train_cfg_raw.get("hi_rank_weight", 0.0)),
+        corr_rul_weight=float(train_cfg_raw.get("corr_rul_weight", 0.2)),
+        hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.1)),
+        hi_monotonic_weight=float(train_cfg_raw.get("hi_monotonic_weight", train_cfg_raw.get("hi_rank_weight", 0.1))),
         hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.03)),
         hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.08)),
         hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.01)),

@@ -39,12 +39,12 @@ model:
   transformer_ffn_dim: 256
   dropout: 0.3
   use_hi: true
-  use_fixed_hi: true  # fixed HI = normalized RUL target (non-learned)
+  use_fixed_hi: false  # HI stays auxiliary; never inject target-derived HI in training
   hi_input_source: "tcn"  # stats | tcn | hybrid
   hi_output_temperature: 1.2
   use_attention: true
-  attention_use_hi_bias: true
-  attention_use_hi_logit: true
+  attention_use_hi_bias: false
+  attention_use_hi_logit: false
   attention_use_temporal_gate: true
   attention_use_recency_bias: true
   attention_conditioning_gain: 3.0
@@ -52,8 +52,8 @@ model:
   attention_temperature: 1.0
   attention_recency_strength: 0.5
   head_hidden_dim: 32
-  model_head_variant: "auto"  # optional alias: auto | old | hi_driven
-  hi_residual_scale: 0.15  # smaller => HI trend dominates, features provide refinement
+  model_head_variant: "old"  # enforced feature-only RUL head
+  rul_head_mode: "plain"
   output_activation: "identity"
 
 train:
@@ -76,13 +76,14 @@ train:
   huber_delta: 0.1
   bias_regularization_weight: 0.0
   std_regularization_weight: 0.02
-  correlation_regularization_weight: 0.02
-  hi_supervision_weight: 0.0
-  hi_rank_weight: 0.0
-  hi_variance_weight: 0.0
+  correlation_regularization_weight: 0.0  # deprecated; use corr_rul_weight
+  corr_rul_weight: 0.2
+  hi_supervision_weight: 0.1
+  hi_monotonic_weight: 0.1
+  hi_variance_weight: 0.03
   hi_variance_floor: 0.03
   hi_smoothness_weight: 0.0
-  residual_regularization_weight: 0.02  # keeps residual path small so HI drives prediction
+  residual_regularization_weight: 0.0
   hi_target_mode: "health"  # fixed convention: higher HI means healthier / larger RUL
 
 evaluation:

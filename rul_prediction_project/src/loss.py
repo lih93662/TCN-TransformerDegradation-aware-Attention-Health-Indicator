@@ -9,18 +9,6 @@ import torch
 import torch.nn as nn
 
 
-class RMSELoss(nn.Module):
-    """Root-mean-square error loss."""
-
-    def __init__(self, eps: float = 1e-8):
-        super().__init__()
-        self.mse = nn.MSELoss()
-        self.eps = eps
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return torch.sqrt(self.mse(pred, target) + self.eps)
-
-
 class MAELoss(nn.Module):
     """Mean absolute error loss."""
 
@@ -73,12 +61,11 @@ class RawRegressionLoss(nn.Module):
         self.mse = nn.MSELoss()
         self.mae = nn.L1Loss()
         self.huber = nn.HuberLoss(delta=float(huber_delta))
-        self.rmse_metric = RMSELoss()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> LossOutput:
         mse = self.mse(pred, target)
         mae = self.mae(pred, target)
-        rmse = self.rmse_metric(pred, target)
+        rmse = torch.sqrt(mse + 1e-8)
         mean_bias = torch.mean(pred - target)
         bias_penalty = mean_bias.pow(2)
         pred_std = torch.std(pred.view(-1), unbiased=False)

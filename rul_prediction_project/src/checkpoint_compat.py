@@ -26,7 +26,7 @@ def detect_checkpoint_head_variant(model_state: Mapping[str, torch.Tensor]) -> s
 
 def resolve_rul_head_mode(
     model_cfg: Mapping[str, object],
-    default: str = "hi_guided_residual",
+    default: str = "plain",
     checkpoint_variant: str | None = None,
 ) -> str:
     """Resolve head mode, supporting optional alias model_head_variant."""
@@ -38,12 +38,12 @@ def resolve_rul_head_mode(
     if variant == "old":
         return "plain"
     if variant == "hi_driven":
-        return "hi_guided_residual"
+        return "plain"
     if variant == "auto":
         if checkpoint_variant == "old":
             return "plain"
         if checkpoint_variant == "hi_driven":
-            return "hi_guided_residual"
+            return "plain"
     return default
 
 
@@ -51,10 +51,8 @@ def detect_model_head_variant(model) -> str:
     """Infer model head variant based on configured head mode."""
 
     mode = str(getattr(model, "rul_head_mode", "plain")).lower()
-    if mode in {"plain", "concat_hi"}:
+    if mode == "plain":
         return "old"
-    if mode == "hi_guided_residual":
-        return "hi_driven"
     return "unknown"
 
 
@@ -73,8 +71,7 @@ def assert_checkpoint_head_compatible(model, model_state: Mapping[str, torch.Ten
         "Checkpoint/model RUL head mismatch detected. "
         f"Checkpoint head='{ckpt_variant}', current model head='{model_variant}' (rul_head_mode='{model_mode}'). "
         "This checkpoint was trained with a different RUL head. Please either: "
-        "(a) set model.rul_head_mode to match the checkpoint variant (old checkpoints: 'plain' or 'concat_hi'; "
-        "new checkpoints: 'hi_guided_residual'), or "
+        "(a) set model.rul_head_mode='plain' and retrain from scratch with this feature-only head, or "
         "(b) retrain and evaluate with matching train/eval configs."
     )
 
