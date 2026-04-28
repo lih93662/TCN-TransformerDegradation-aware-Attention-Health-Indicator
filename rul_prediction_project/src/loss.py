@@ -71,12 +71,7 @@ class RawRegressionLoss(nn.Module):
         pred_std = torch.std(pred.view(-1), unbiased=False)
         target_std = torch.std(target.view(-1), unbiased=False)
         std_penalty = (pred_std - target_std).pow(2)
-        pred_centered = pred.view(-1) - torch.mean(pred.view(-1))
-        target_centered = target.view(-1) - torch.mean(target.view(-1))
-        corr_denom = torch.sqrt(
-            torch.sum(pred_centered.pow(2)) * torch.sum(target_centered.pow(2)) + 1e-8
-        )
-        corr = torch.sum(pred_centered * target_centered) / corr_denom
+        corr = pearson_corr(pred, target)
         corr_penalty = 1.0 - corr
 
         if self.mode == "mse":
@@ -108,6 +103,17 @@ class RawRegressionLoss(nn.Module):
         )
 
 
+def pearson_corr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Compute Pearson correlation on flattened tensors."""
+
+    p = pred.view(-1).float()
+    t = target.view(-1).float()
+    p_centered = p - torch.mean(p)
+    t_centered = t - torch.mean(t)
+    denom = torch.sqrt(torch.sum(p_centered.pow(2)) * torch.sum(t_centered.pow(2)) + eps)
+    return torch.sum(p_centered * t_centered) / denom
+
+
 def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
     """Compute scalar regression metrics from tensors."""
 
@@ -119,6 +125,7 @@ def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict
     rmse = mse ** 0.5
     mae = torch.mean(torch.abs(err)).item()
     mean_bias = torch.mean(err).item()
+    corr = float(pearson_corr(pred, target).item())
 
     target_mean = torch.mean(target)
     ss_res = torch.sum(err.pow(2))
@@ -133,7 +140,9 @@ def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict
         "mae": mae,
         "mse": mse,
         "r2": r2,
+        "bias": mean_bias,
         "mean_bias": mean_bias,
+        "pearson_corr": corr,
         "pred_mean": float(torch.mean(pred).item()),
         "pred_std": pred_std,
         "pred_min": float(torch.min(pred).item()),
@@ -142,6 +151,7 @@ def compute_regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict
         "true_std": true_std,
         "true_min": float(torch.min(target).item()),
         "true_max": float(torch.max(target).item()),
+        "pred_true_std_ratio": pred_std / max(true_std, 1e-8),
     }
 
 

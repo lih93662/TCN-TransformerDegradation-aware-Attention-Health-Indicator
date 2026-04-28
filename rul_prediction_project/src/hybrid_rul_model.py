@@ -31,6 +31,9 @@ class ModelConfig:
     use_fixed_hi: bool = False
     hi_input_source: str = "tcn"
     hi_output_temperature: float = 1.2
+    use_degradation_attention: bool = True
+    use_hi_auxiliary: bool = True
+    use_hi_in_rul_head: bool = False
     use_attention: bool = True
     attention_use_hi_bias: bool = True
     attention_use_hi_logit: bool = True
@@ -41,7 +44,7 @@ class ModelConfig:
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
-    rul_head_mode: str = "plain"
+    rul_head_mode: str = "feature_only"
     output_activation: str = "identity"
 
 
@@ -71,7 +74,7 @@ class HybridRULModel(nn.Module):
             ffn_dim=cfg.transformer_ffn_dim,
             dropout=cfg.dropout,
         )
-        self.use_hi = bool(cfg.use_hi)
+        self.use_hi = bool(cfg.use_hi and cfg.use_hi_auxiliary)
         self.hi = (
             HealthIndicatorNet(
                 sensor_dim=cfg.sensor_dim,
@@ -83,7 +86,7 @@ class HybridRULModel(nn.Module):
             else None
         )
         self.hi_feature_dim = self.hi.feature_dim if self.hi is not None else (cfg.sensor_dim * 4)
-        self.use_attention = bool(cfg.use_attention)
+        self.use_attention = bool(cfg.use_attention and cfg.use_degradation_attention)
         if self.use_attention:
             self.degradation_attention = DegradationAwareAttention(
                 embed_dim=cfg.transformer_embed_dim,
@@ -105,8 +108,10 @@ class HybridRULModel(nn.Module):
         # RUL prediction is feature-only by design (no HI-to-RUL direct path).
         fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim
         self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
+        if bool(cfg.use_hi_in_rul_head):
+            raise ValueError("use_hi_in_rul_head must remain False for leakage-safe feature-only RUL prediction.")
         self.rul_head_mode = str(cfg.rul_head_mode).lower()
-        if self.rul_head_mode != "plain":
+        if self.rul_head_mode not in {"plain", "feature_only"}:
             raise ValueError(f"Unsupported rul_head_mode: {cfg.rul_head_mode}")
         self.rul_head = RULHead(
             input_dim=64,
@@ -165,8 +170,10 @@ class HybridRULModel(nn.Module):
 
         # Stage 3: optional degradation-aware attention
         if self.use_attention and self.degradation_attention is not None:
-            # Enforce HI as auxiliary-only signal; attention remains feature-only.
-            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, None)
+            attn_hi = hi_logit if self.cfg.attention_use_hi_logit else hi_score
+            if not self.cfg.attention_use_hi_bias:
+                attn_hi = None
+            da_feat, attn_map, temporal_attn, attention_debug = self.degradation_attention(tr_seq, attn_hi)
         else:
             da_feat = tr_pool
             temporal_attn = torch.full(
