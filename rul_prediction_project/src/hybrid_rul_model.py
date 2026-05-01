@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from .degradation_attention import DegradationAwareAttention
 from .health_indicator import HealthIndicatorNet
-from .rul_head import FusionMLP, HIGuidedResidualRULHead, RULHead
+from .rul_head import FusionMLP, RULHead
 from .tcn import TCNEncoder
 from .transformer_encoder import TransformerTemporalEncoder
 
@@ -31,6 +31,9 @@ class ModelConfig:
     use_fixed_hi: bool = False
     hi_input_source: str = "tcn"
     hi_output_temperature: float = 1.2
+    use_degradation_attention: bool = True
+    use_hi_auxiliary: bool = True
+    use_hi_in_rul_head: bool = False
     use_attention: bool = True
     attention_use_hi_bias: bool = True
     attention_use_hi_logit: bool = True
@@ -41,8 +44,7 @@ class ModelConfig:
     attention_temperature: float = 1.0
     attention_recency_strength: float = 0.5
     head_hidden_dim: int = 32
-    rul_head_mode: str = "hi_guided_residual"
-    hi_residual_scale: float = 0.3
+    rul_head_mode: str = "feature_only"
     output_activation: str = "identity"
 
 
@@ -72,7 +74,7 @@ class HybridRULModel(nn.Module):
             ffn_dim=cfg.transformer_ffn_dim,
             dropout=cfg.dropout,
         )
-        self.use_hi = bool(cfg.use_hi)
+        self.use_hi = bool(cfg.use_hi and cfg.use_hi_auxiliary)
         self.hi = (
             HealthIndicatorNet(
                 sensor_dim=cfg.sensor_dim,
@@ -84,7 +86,7 @@ class HybridRULModel(nn.Module):
             else None
         )
         self.hi_feature_dim = self.hi.feature_dim if self.hi is not None else (cfg.sensor_dim * 4)
-        self.use_attention = bool(cfg.use_attention)
+        self.use_attention = bool(cfg.use_attention and cfg.use_degradation_attention)
         if self.use_attention:
             self.degradation_attention = DegradationAwareAttention(
                 embed_dim=cfg.transformer_embed_dim,
@@ -103,30 +105,19 @@ class HybridRULModel(nn.Module):
             self.degradation_attention = None
             attention_dim = cfg.transformer_embed_dim
 
-        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim + 1
+        # RUL prediction is feature-only by design (no HI-to-RUL direct path).
+        fusion_input_dim = cfg.tcn_channels + cfg.transformer_embed_dim + attention_dim
         self.fusion = FusionMLP(fusion_input_dim, dropout=cfg.dropout)
+        if bool(cfg.use_hi_in_rul_head):
+            raise ValueError("use_hi_in_rul_head must remain False for leakage-safe feature-only RUL prediction.")
         self.rul_head_mode = str(cfg.rul_head_mode).lower()
-        if self.rul_head_mode == "plain":
-            self.rul_head = RULHead(
-                input_dim=64,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-            )
-        elif self.rul_head_mode == "concat_hi":
-            self.rul_head = RULHead(
-                input_dim=65,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-            )
-        elif self.rul_head_mode == "hi_guided_residual":
-            self.rul_head = HIGuidedResidualRULHead(
-                feature_dim=64,
-                hidden_dim=cfg.head_hidden_dim,
-                activation=cfg.output_activation,
-                residual_scale=cfg.hi_residual_scale,
-            )
-        else:
+        if self.rul_head_mode not in {"plain", "feature_only"}:
             raise ValueError(f"Unsupported rul_head_mode: {cfg.rul_head_mode}")
+        self.rul_head = RULHead(
+            input_dim=64,
+            hidden_dim=cfg.head_hidden_dim,
+            activation=cfg.output_activation,
+        )
 
     def forward(self, x: torch.Tensor, fixed_hi: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
         # Stage 1/2 backbone variants
@@ -195,20 +186,13 @@ class HybridRULModel(nn.Module):
             attention_debug = None
 
         # Stage 4: Feature fusion
-        fused = torch.cat([tcn_pool, tr_pool, da_feat, hi_score], dim=-1)
+        fused = torch.cat([tcn_pool, tr_pool, da_feat], dim=-1)
         fused = self.fusion(fused)
 
         # Stage 5: Prediction
-        if self.rul_head_mode == "plain":
-            pred = self.rul_head(fused)
-            hi_component = torch.zeros_like(pred)
-            residual_component = pred
-        elif self.rul_head_mode == "concat_hi":
-            pred = self.rul_head(torch.cat([fused, hi_score], dim=-1))
-            hi_component = torch.zeros_like(pred)
-            residual_component = pred
-        else:
-            pred, hi_component, residual_component = self.rul_head(fused, hi_score)
+        pred = self.rul_head(fused)
+        hi_component = torch.zeros_like(pred)
+        residual_component = pred
 
         return {
             "pred": pred,

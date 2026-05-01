@@ -93,11 +93,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip attention averaging/plots to reduce memory use.",
     )
-    parser.add_argument(
-        "--enable-linear-calibration",
-        action="store_true",
-        help="Enable post-hoc linear calibration fitted on validation predictions (default: disabled).",
-    )
     return parser.parse_args()
 
 
@@ -120,9 +115,12 @@ def _build_model(
         dropout=float(m["dropout"]),
         backbone_variant=str(m.get("backbone_variant", "tcn_transformer")),
         use_hi=bool(m.get("use_hi", True)),
+        use_hi_auxiliary=bool(m.get("use_hi_auxiliary", m.get("use_hi", True))),
+        use_hi_in_rul_head=bool(m.get("use_hi_in_rul_head", False)),
         use_fixed_hi=bool(m.get("use_fixed_hi", False)),
         hi_input_source=str(m.get("hi_input_source", "tcn")),
         hi_output_temperature=float(m.get("hi_output_temperature", 1.2)),
+        use_degradation_attention=bool(m.get("use_degradation_attention", m.get("use_attention", True))),
         use_attention=bool(m.get("use_attention", True)),
         attention_use_hi_bias=bool(m.get("attention_use_hi_bias", True)),
         attention_use_hi_logit=bool(m.get("attention_use_hi_logit", True)),
@@ -135,10 +133,9 @@ def _build_model(
         head_hidden_dim=int(m.get("head_hidden_dim", 32)),
         rul_head_mode=resolve_rul_head_mode(
             m,
-            default="hi_guided_residual",
+            default="feature_only",
             checkpoint_variant=checkpoint_head_variant,
         ),
-        hi_residual_scale=float(m.get("hi_residual_scale", 0.3)),
         output_activation=str(m.get("output_activation", "identity")),
     )
     return HybridRULModel(model_cfg).to(device)
@@ -169,21 +166,6 @@ def _figure_path(figures_dir: Path, filename: str) -> Path:
     path = figures_dir / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def _fit_linear_calibration(y_pred: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
-    x = np.asarray(y_pred, dtype=np.float64).reshape(-1)
-    y = np.asarray(y_true, dtype=np.float64).reshape(-1)
-    if x.size < 2 or float(np.std(x)) < 1e-8:
-        return 1.0, 0.0
-    x_mean = float(np.mean(x))
-    y_mean = float(np.mean(y))
-    denom = float(np.sum((x - x_mean) ** 2))
-    if denom <= 1e-12:
-        return 1.0, 0.0
-    a = float(np.sum((x - x_mean) * (y - y_mean)) / denom)
-    b = float(y_mean - a * x_mean)
-    return a, b
 
 
 def main() -> None:
@@ -277,62 +259,27 @@ def main() -> None:
     y_pred = result.y_pred.astype(np.float32)
     residuals = y_pred - y_true
     calibration = {"enabled": False, "a": 1.0, "b": 0.0, "source_split": "none"}
-    if args.split == "test" and args.enable_linear_calibration:
-        logger.info("Fitting linear calibration on validation split and applying to test split.")
-        valid_loader = DataLoader(prepared.valid_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
-        valid_result = evaluate_model(
-            model,
-            valid_loader,
-            device,
-            max_attention_samples=0,
-            skip_attention_export=True,
-        )
-        a, b = _fit_linear_calibration(valid_result.y_pred.astype(np.float32), valid_result.y_true.astype(np.float32))
-        calibration = {"enabled": True, "a": float(a), "b": float(b), "source_split": "valid"}
-        logger.info("Linear calibration coefficients: a=%.6f, b=%.6f", a, b)
-    elif args.split == "test":
-        logger.info("Linear calibration disabled by default. Pass --enable-linear-calibration to enable it.")
-    else:
-        logger.info("Linear calibration skipped because evaluation split is '%s'.", args.split)
-
-    y_pred_cal = (calibration["a"] * y_pred + calibration["b"]).astype(np.float32)
+    y_pred_cal = y_pred.copy()
 
     norm_metrics = compute_regression_metrics(torch.from_numpy(y_pred), torch.from_numpy(y_true))
     norm_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred), torch.from_numpy(y_true))
     norm_metrics["num_samples"] = int(len(y_true))
     norm_metrics["pred_true_std_ratio"] = norm_metrics["pred_std"] / max(norm_metrics["true_std"], 1e-8)
-    norm_metrics_cal = compute_regression_metrics(torch.from_numpy(y_pred_cal), torch.from_numpy(y_true))
-    norm_metrics_cal["phm_score"] = phm2012_score(torch.from_numpy(y_pred_cal), torch.from_numpy(y_true))
-    norm_metrics_cal["num_samples"] = int(len(y_true))
-    norm_metrics_cal["pred_true_std_ratio"] = norm_metrics_cal["pred_std"] / max(norm_metrics_cal["true_std"], 1e-8)
 
     target_scale = float(prepared.target_scale)
     y_true_raw = y_true * target_scale
     y_pred_raw = y_pred * target_scale
-    y_pred_raw_cal = y_pred_cal * target_scale
     raw_metrics = compute_regression_metrics(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
     raw_metrics["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw), torch.from_numpy(y_true_raw))
     raw_metrics["target_scale"] = target_scale
     raw_metrics["pred_true_std_ratio"] = raw_metrics["pred_std"] / max(raw_metrics["true_std"], 1e-8)
-    raw_metrics_cal = compute_regression_metrics(torch.from_numpy(y_pred_raw_cal), torch.from_numpy(y_true_raw))
-    raw_metrics_cal["phm_score"] = phm2012_score(torch.from_numpy(y_pred_raw_cal), torch.from_numpy(y_true_raw))
-    raw_metrics_cal["target_scale"] = target_scale
-    raw_metrics_cal["pred_true_std_ratio"] = raw_metrics_cal["pred_std"] / max(raw_metrics_cal["true_std"], 1e-8)
 
     grouped_rows = grouped_regression_metrics(result.ids, y_true, y_pred)
-    grouped_rows_cal = grouped_regression_metrics(result.ids, y_true, y_pred_cal)
     grouped_rows_raw = grouped_regression_metrics(result.ids, y_true_raw, y_pred_raw)
-    grouped_rows_raw_cal = grouped_regression_metrics(result.ids, y_true_raw, y_pred_raw_cal)
-    for row_norm, row_raw, row_norm_cal, row_raw_cal in zip(grouped_rows, grouped_rows_raw, grouped_rows_cal, grouped_rows_raw_cal):
+    for row_norm, row_raw in zip(grouped_rows, grouped_rows_raw):
         row_norm["rmse_raw"] = row_raw["rmse"]
         row_norm["mae_raw"] = row_raw["mae"]
         row_norm["mean_bias_raw"] = row_raw["mean_bias"]
-        row_norm["rmse_calibrated"] = row_norm_cal["rmse"]
-        row_norm["mae_calibrated"] = row_norm_cal["mae"]
-        row_norm["mean_bias_calibrated"] = row_norm_cal["mean_bias"]
-        row_norm["rmse_raw_calibrated"] = row_raw_cal["rmse"]
-        row_norm["mae_raw_calibrated"] = row_raw_cal["mae"]
-        row_norm["mean_bias_raw_calibrated"] = row_raw_cal["mean_bias"]
 
     attention_mean = _attention_average(result.attention_maps, window_size=int(data_cfg.get("window_size", 40)))
     temporal_attention_examples = result.temporal_attention[: int(eval_cfg.get("attention_num_samples", 3))]
@@ -345,13 +292,9 @@ def main() -> None:
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     plot_rul_curve(y_true, y_pred, _figure_path(figures_dir, "prediction_timeseries_normalized.png"))
-    plot_rul_curve(y_true, y_pred_cal, _figure_path(figures_dir, "prediction_timeseries_normalized_calibrated.png"))
     plot_rul_curve(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_timeseries_raw.png"))
-    plot_rul_curve(y_true_raw, y_pred_raw_cal, _figure_path(figures_dir, "prediction_timeseries_raw_calibrated.png"))
     plot_prediction_scatter(y_true, y_pred, _figure_path(figures_dir, "prediction_scatter_normalized.png"))
-    plot_prediction_scatter(y_true, y_pred_cal, _figure_path(figures_dir, "prediction_scatter_normalized_calibrated.png"))
     plot_prediction_scatter(y_true_raw, y_pred_raw, _figure_path(figures_dir, "prediction_scatter_raw.png"))
-    plot_prediction_scatter(y_true_raw, y_pred_raw_cal, _figure_path(figures_dir, "prediction_scatter_raw_calibrated.png"))
     plot_residual_histogram(residuals, _figure_path(figures_dir, "residual_histogram_normalized.png"))
     plot_residual_histogram(y_pred_raw - y_true_raw, _figure_path(figures_dir, "residual_histogram_raw.png"))
     plot_residual_vs_target(y_true, residuals, _figure_path(figures_dir, "residual_vs_target_normalized.png"))
@@ -385,16 +328,14 @@ def main() -> None:
     hi_summary["corr_hi_pred_rul"] = float(corr_pred) if np.isfinite(corr_pred) else float("nan")
 
     scatter_rows = []
-    for i, (bid, yt, yp, yp_cal, hi) in enumerate(zip(result.ids, y_true_raw, y_pred_raw, y_pred_raw_cal, result.hi)):
+    for i, (bid, yt, yp, hi) in enumerate(zip(result.ids, y_true_raw, y_pred_raw, result.hi)):
         scatter_rows.append(
             {
                 "sample_index": i,
                 "group": bid,
                 "true_rul_raw": float(yt),
                 "pred_rul_raw": float(yp),
-                "pred_rul_raw_calibrated": float(yp_cal),
                 "error_raw": float(yp - yt),
-                "error_raw_calibrated": float(yp_cal - yt),
                 "health_indicator": float(hi),
             }
         )
@@ -412,13 +353,12 @@ def main() -> None:
             "split": args.split,
             "checkpoint": str(ckpt),
             "normalized": norm_metrics,
-            "normalized_calibrated": norm_metrics_cal,
             "raw": raw_metrics,
-            "raw_calibrated": raw_metrics_cal,
             "calibration": calibration,
         },
     )
     save_csv_rows(tables_dir / "grouped_metrics.csv", grouped_rows)
+    save_csv_rows(paths["results"] / "per_bearing_results.csv", grouped_rows)
     save_csv_rows(tables_dir / "prediction_scatter_raw.csv", scatter_rows)
     save_json(tables_dir / "hi_summary.json", hi_summary)
 
@@ -431,18 +371,8 @@ def main() -> None:
         norm_metrics["mean_bias"],
         norm_metrics["pred_true_std_ratio"],
     )
-    logger.info(
-        "Calibrated | RMSE %.6f | MAE %.6f | R2 %.6f | Bias %+.6f | Pred/True Std Ratio %.6f",
-        norm_metrics_cal["rmse"],
-        norm_metrics_cal["mae"],
-        norm_metrics_cal["r2"],
-        norm_metrics_cal["mean_bias"],
-        norm_metrics_cal["pred_true_std_ratio"],
-    )
     logger.info("Evaluation normalized metrics: %s", norm_metrics)
-    logger.info("Evaluation normalized metrics (calibrated): %s", norm_metrics_cal)
     logger.info("Evaluation raw metrics: %s", raw_metrics)
-    logger.info("Evaluation raw metrics (calibrated): %s", raw_metrics_cal)
     logger.info("HI summary: %s", hi_summary)
     logger.info("Saved evaluation artifacts under %s", eval_dir)
 

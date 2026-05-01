@@ -172,15 +172,18 @@ def main() -> None:
         save_csv_rows(shared_paths["results"] / "ablation_summary.csv", rows)
         formal_rows = _formalize_rows(rows)
         save_csv_rows(shared_paths["results"] / "ablation_table.csv", formal_rows)
+        save_csv_rows(shared_paths["results"] / "ablation_results.csv", formal_rows)
         with open(shared_paths["results"] / "ablation_summary.json", "w", encoding="utf-8") as f:
             json.dump(rows, f, ensure_ascii=False, indent=2)
         md_path = shared_paths["results"] / "ablation_table.md"
+        md_path_alt = shared_paths["results"] / "ablation_results.md"
         headers = list(formal_rows[0].keys())
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write("| " + " | ".join(headers) + " |\n")
-            f.write("| " + " | ".join(["---"] * len(headers)) + " |\n")
-            for row in formal_rows:
-                f.write("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n")
+        for target_md in (md_path, md_path_alt):
+            with open(target_md, "w", encoding="utf-8") as f:
+                f.write("| " + " | ".join(headers) + " |\n")
+                f.write("| " + " | ".join(["---"] * len(headers)) + " |\n")
+                for row in formal_rows:
+                    f.write("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n")
         print(f"\nSaved ablation table: {shared_paths['results'] / 'ablation_table.csv'}")
 
 

@@ -26,7 +26,7 @@ def detect_checkpoint_head_variant(model_state: Mapping[str, torch.Tensor]) -> s
 
 def resolve_rul_head_mode(
     model_cfg: Mapping[str, object],
-    default: str = "hi_guided_residual",
+    default: str = "feature_only",
     checkpoint_variant: str | None = None,
 ) -> str:
     """Resolve head mode, supporting optional alias model_head_variant."""
@@ -36,25 +36,23 @@ def resolve_rul_head_mode(
         return explicit_mode
     variant = str(model_cfg.get("model_head_variant", "")).strip().lower()
     if variant == "old":
-        return "plain"
+        return "feature_only"
     if variant == "hi_driven":
-        return "hi_guided_residual"
+        return "feature_only"
     if variant == "auto":
         if checkpoint_variant == "old":
-            return "plain"
+            return "feature_only"
         if checkpoint_variant == "hi_driven":
-            return "hi_guided_residual"
+            return "feature_only"
     return default
 
 
 def detect_model_head_variant(model) -> str:
     """Infer model head variant based on configured head mode."""
 
-    mode = str(getattr(model, "rul_head_mode", "plain")).lower()
-    if mode in {"plain", "concat_hi"}:
+    mode = str(getattr(model, "rul_head_mode", "feature_only")).lower()
+    if mode in {"plain", "feature_only"}:
         return "old"
-    if mode == "hi_guided_residual":
-        return "hi_driven"
     return "unknown"
 
 
@@ -68,13 +66,12 @@ def assert_checkpoint_head_compatible(model, model_state: Mapping[str, torch.Ten
     if ckpt_variant == model_variant:
         return
 
-    model_mode = str(getattr(model, "rul_head_mode", "plain")).lower()
+    model_mode = str(getattr(model, "rul_head_mode", "feature_only")).lower()
     raise RuntimeError(
         "Checkpoint/model RUL head mismatch detected. "
         f"Checkpoint head='{ckpt_variant}', current model head='{model_variant}' (rul_head_mode='{model_mode}'). "
         "This checkpoint was trained with a different RUL head. Please either: "
-        "(a) set model.rul_head_mode to match the checkpoint variant (old checkpoints: 'plain' or 'concat_hi'; "
-        "new checkpoints: 'hi_guided_residual'), or "
+        "(a) set model.rul_head_mode='feature_only' and retrain from scratch with this feature-only head, or "
         "(b) retrain and evaluate with matching train/eval configs."
     )
 

@@ -192,10 +192,12 @@ def build_model(cfg: Dict, checkpoint_path: Path, device: torch.device) -> Hybri
         dropout=float(m["dropout"]),
         rul_head_mode=resolve_rul_head_mode(
             m,
-            default="hi_guided_residual",
+            default="feature_only",
             checkpoint_variant=checkpoint_head_variant,
         ),
-        hi_residual_scale=float(m.get("hi_residual_scale", 0.3)),
+        use_hi_auxiliary=bool(m.get("use_hi_auxiliary", m.get("use_hi", True))),
+        use_hi_in_rul_head=bool(m.get("use_hi_in_rul_head", False)),
+        use_degradation_attention=bool(m.get("use_degradation_attention", m.get("use_attention", True))),
     )
 
     model = HybridRULModel(model_cfg).to(device)

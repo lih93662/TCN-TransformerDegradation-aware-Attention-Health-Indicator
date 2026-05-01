@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from .checkpoint_compat import load_model_state_strict
 from .evaluator import evaluate_model
-from .loss import RawRegressionLoss, compute_regression_metrics
+from .loss import RawRegressionLoss, compute_regression_metrics, pearson_corr
 from .utils import save_csv_rows, save_json
 from .visualization import plot_rul_curve
 
@@ -42,13 +42,14 @@ class TrainerConfig:
     huber_delta: float = 0.1
     bias_regularization_weight: float = 0.0
     std_regularization_weight: float = 0.0
-    correlation_regularization_weight: float = 0.0
+    correlation_regularization_weight: float = 0.0  # deprecated
+    pred_corr_weight: float = 0.2
+    negative_corr_weight: float = 0.5
     hi_supervision_weight: float = 0.0
-    hi_rank_weight: float = 0.0
-    hi_variance_weight: float = 0.03
+    hi_monotonic_weight: float = 0.02
+    hi_variance_weight: float = 0.1
     hi_variance_floor: float = 0.08
-    hi_smoothness_weight: float = 0.01
-    residual_regularization_weight: float = 0.0
+    hi_smoothness_weight: float = 0.005
     hi_target_mode: str = "health"
     collapse_std_threshold: float = 1e-4
 
@@ -155,11 +156,11 @@ class Trainer:
             "std_penalty": 0.0,
             "corr_penalty": 0.0,
             "corr_value": 0.0,
+            "pred_corr_loss": 0.0,
             "hi_supervision": 0.0,
-            "hi_rank": 0.0,
+            "hi_monotonic": 0.0,
             "hi_var_penalty": 0.0,
             "hi_smoothness": 0.0,
-            "residual_penalty": 0.0,
         }
         batch_rows: List[Dict[str, float]] = []
 
@@ -193,51 +194,28 @@ class Trainer:
 
                 out = self.model(x, fixed_hi=y.detach() if fixed_hi_mode else None)
                 loss_out = self.criterion(out["pred"], y)
+                # Keep HI as weakly-constrained auxiliary signal only.
                 hi_sup = torch.tensor(0.0, device=self.device)
-                hi_rank = torch.tensor(0.0, device=self.device)
+                hi_monotonic = torch.tensor(0.0, device=self.device)
                 hi_var_pen = torch.tensor(0.0, device=self.device)
                 hi_smoothness = torch.tensor(0.0, device=self.device)
+                corr_rul = pearson_corr(out["pred"], y)
+                corr_rul_loss = (1.0 - corr_rul) + self.config.negative_corr_weight * torch.relu(-corr_rul)
                 # Fixed project convention: HI is a health indicator aligned with RUL.
                 hi_target = y
                 if (not fixed_hi_mode) and self.config.hi_supervision_weight > 0 and out.get("hi") is not None:
                     hi_sup = torch.nn.functional.mse_loss(out["hi"], hi_target)
-                if (not fixed_hi_mode) and self.config.hi_rank_weight > 0 and out.get("hi") is not None:
+                if (not fixed_hi_mode) and self.config.hi_monotonic_weight > 0 and out.get("hi") is not None:
                     y_flat = hi_target.view(-1)
                     hi_flat = out["hi"].view(-1)
                     pair_idx = torch.randperm(y_flat.numel(), device=self.device)
                     margin = (y_flat - y_flat[pair_idx]) * (hi_flat - hi_flat[pair_idx])
-                    hi_rank = torch.nn.functional.softplus(-margin).mean()
+                    hi_monotonic = torch.nn.functional.softplus(-margin).mean()
                 if (not fixed_hi_mode) and self.config.hi_variance_weight > 0 and out.get("hi") is not None:
-                    # Penalize low variance directly on bounded HI output to
-                    # prevent near-constant HI collapse.
-                    hi_for_var = out["hi"]
-                    batch_ids = list(batch.get("id", []))
-                    penalties = []
-                    if batch_ids:
-                        unique_ids = sorted(set(batch_ids))
-                        for uid in unique_ids:
-                            idx = [i for i, bid in enumerate(batch_ids) if bid == uid]
-                            if len(idx) < 2:
-                                continue
-                            idx_t = torch.as_tensor(idx, device=self.device, dtype=torch.long)
-                            hi_std_i = torch.std(hi_for_var.index_select(0, idx_t).view(-1), unbiased=False)
-                            penalties.append(
-                                torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std_i).pow(2)
-                            )
-                    if penalties:
-                        hi_var_pen = torch.stack(penalties).mean()
-                    else:
-                        hi_std = torch.std(hi_for_var.view(-1), unbiased=False)
-                        hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
+                    hi_std = torch.std(out["hi"].view(-1), unbiased=False)
+                    hi_var_pen = torch.relu(torch.tensor(self.config.hi_variance_floor, device=self.device) - hi_std).pow(2)
                 hi_temporal = out.get("hi_temporal")
                 hi_temporal_logit = out.get("hi_temporal_logit")
-                residual_penalty = torch.tensor(0.0, device=self.device)
-                if (
-                    str(getattr(self.model, "rul_head_mode", "plain")).lower() == "hi_guided_residual"
-                    and self.config.residual_regularization_weight > 0
-                    and out.get("residual_component") is not None
-                ):
-                    residual_penalty = out["residual_component"].abs().mean()
                 if (not fixed_hi_mode) and self.config.hi_smoothness_weight > 0 and hi_temporal is not None and hi_temporal.size(1) > 1:
                     smooth_src = hi_temporal_logit if hi_temporal_logit is not None else hi_temporal
                     hi_delta = smooth_src[:, 1:, :] - smooth_src[:, :-1, :]
@@ -246,10 +224,10 @@ class Trainer:
                 total_loss = (
                     loss_out.total
                     + self.config.hi_supervision_weight * hi_sup
-                    + self.config.hi_rank_weight * hi_rank
+                    + self.config.hi_monotonic_weight * hi_monotonic
                     + self.config.hi_variance_weight * hi_var_pen
                     + self.config.hi_smoothness_weight * hi_smoothness
-                    + self.config.residual_regularization_weight * residual_penalty
+                    + self.config.pred_corr_weight * corr_rul_loss
                 )
 
                 if train:
@@ -269,12 +247,12 @@ class Trainer:
                 totals["bias_penalty"] += float(loss_out.bias_penalty.item())
                 totals["std_penalty"] += float(loss_out.std_penalty.item())
                 totals["corr_penalty"] += float(loss_out.corr_penalty.item())
-                totals["corr_value"] += float(loss_out.corr_value.item())
+                totals["corr_value"] += float(corr_rul.item())
+                totals["pred_corr_loss"] += float(corr_rul_loss.item())
                 totals["hi_supervision"] += float(hi_sup.item())
-                totals["hi_rank"] += float(hi_rank.item())
+                totals["hi_monotonic"] += float(hi_monotonic.item())
                 totals["hi_var_penalty"] += float(hi_var_pen.item())
                 totals["hi_smoothness"] += float(hi_smoothness.item())
-                totals["residual_penalty"] += float(residual_penalty.item())
 
                 hi = out.get("hi")
                 if hi is not None:
@@ -323,11 +301,12 @@ class Trainer:
                         "bias_penalty": float(loss_out.bias_penalty.item()),
                         "std_penalty": float(loss_out.std_penalty.item()),
                         "corr_penalty": float(loss_out.corr_penalty.item()),
-                        "corr_value": float(loss_out.corr_value.item()),
+                        "corr_value": float(corr_rul.item()),
                         "hi_supervision_loss": float(hi_sup.item()),
-                        "hi_rank_loss": float(hi_rank.item()),
+                        "hi_monotonic_loss": float(hi_monotonic.item()),
                         "hi_variance_penalty": float(hi_var_pen.item()),
                         "hi_smoothness_loss": float(hi_smoothness.item()),
+                        "pred_corr_loss": float(corr_rul_loss.item()),
                         "lr": float(current_lr),
                         "attn_min": attn_min,
                         "attn_max": attn_max,
@@ -356,8 +335,9 @@ class Trainer:
             f"{mode}_std_penalty": totals["std_penalty"] / n,
             f"{mode}_corr_penalty": totals["corr_penalty"] / n,
             f"{mode}_corr_value": totals["corr_value"] / n,
+            f"{mode}_pred_corr_loss": totals["pred_corr_loss"] / n,
             f"{mode}_hi_supervision": totals["hi_supervision"] / n,
-            f"{mode}_hi_rank": totals["hi_rank"] / n,
+            f"{mode}_hi_monotonic": totals["hi_monotonic"] / n,
             f"{mode}_hi_var_penalty": totals["hi_var_penalty"] / n,
             f"{mode}_hi_smoothness": totals["hi_smoothness"] / n,
             f"{mode}_hi_mean": hi_mean_sum / max(1, hi_batches),
@@ -383,6 +363,18 @@ class Trainer:
         if attn_map_sum is not None and attn_batches > 0:
             attn_avg = (attn_map_sum / float(attn_batches)).astype(np.float32)
 
+        # Recompute prediction metrics once on pooled tensors to keep a single metric definition.
+        pred_all, true_all, _, _ = self._collect_predictions(loader)
+        if len(pred_all):
+            pooled_metrics = compute_regression_metrics(
+                torch.from_numpy(pred_all.astype(np.float32)),
+                torch.from_numpy(true_all.astype(np.float32)),
+            )
+            metrics[f"{mode}_rmse"] = pooled_metrics["rmse"]
+            metrics[f"{mode}_mae"] = pooled_metrics["mae"]
+            metrics[f"{mode}_mse"] = pooled_metrics["mse"]
+            metrics[f"{mode}_mean_bias"] = pooled_metrics["bias"]
+            metrics[f"{mode}_corr_value"] = pooled_metrics["pearson_corr"]
         return metrics, batch_rows, attn_stats, attn_avg
 
     def _collect_predictions(self, loader: DataLoader) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -461,6 +453,7 @@ class Trainer:
         hi_true_corr = float(np.corrcoef(hi, true)[0, 1]) if len(hi) > 1 else float("nan")
         hi_true_degradation_corr = float(np.corrcoef(hi, 1.0 - true)[0, 1]) if len(hi) > 1 else float("nan")
         hi_pred_corr = float(np.corrcoef(hi, pred)[0, 1]) if len(hi) > 1 else float("nan")
+        pred_true_corr = float(np.corrcoef(pred, true)[0, 1]) if len(pred) > 1 else float("nan")
         regression_stats["hi_mean"] = float(np.mean(hi)) if len(hi) else float("nan")
         regression_stats["hi_std"] = float(np.std(hi)) if len(hi) else float("nan")
         regression_stats["hi_true_corr"] = hi_true_corr if np.isfinite(hi_true_corr) else float("nan")
@@ -468,6 +461,7 @@ class Trainer:
             hi_true_degradation_corr if np.isfinite(hi_true_degradation_corr) else float("nan")
         )
         regression_stats["hi_pred_corr"] = hi_pred_corr if np.isfinite(hi_pred_corr) else float("nan")
+        regression_stats["pred_true_corr"] = pred_true_corr if np.isfinite(pred_true_corr) else float("nan")
 
         if len(pred):
             plot_rul_curve(true, pred, self.curve_dir / f"epoch_{epoch:03d}_{phase}_all.png")
@@ -492,6 +486,15 @@ class Trainer:
                 epoch,
                 regression_stats["pred_std"],
             )
+        if np.isfinite(regression_stats["hi_pred_corr"]) and abs(regression_stats["hi_pred_corr"]) > 0.90:
+            self.logger.warning("Potential shortcut warning for %s epoch %03d: |corr(pred,hi)|=%.4f > 0.90", phase, epoch, regression_stats["hi_pred_corr"])
+        if np.isfinite(regression_stats["hi_std"]) and regression_stats["hi_std"] < 0.01:
+            self.logger.warning("HI collapse warning for %s epoch %03d: hi_std=%.6f < 0.01", phase, epoch, regression_stats["hi_std"])
+        if np.isfinite(regression_stats["pred_true_corr"]) and regression_stats["pred_true_corr"] < 0.0:
+            self.logger.warning("Negative corr warning for %s epoch %03d: corr(pred,true)=%.4f", phase, epoch, regression_stats["pred_true_corr"])
+        std_ratio = regression_stats["pred_std"] / max(regression_stats["true_std"], 1e-8)
+        if np.isfinite(std_ratio) and not (0.7 <= std_ratio <= 1.3):
+            self.logger.warning("Std ratio warning for %s epoch %03d: pred/true std ratio=%.4f (expected 0.7~1.3)", phase, epoch, std_ratio)
 
         self.logger.info(
             (
@@ -513,6 +516,19 @@ class Trainer:
             regression_stats["hi_true_corr"],
             regression_stats["hi_true_degradation_corr"],
             regression_stats["hi_pred_corr"],
+        )
+        self.logger.info(
+            (
+                "%s epoch %03d debug corr/std | pred_true_corr %.4f | hi_true_corr %.4f | "
+                "hi_pred_corr %.4f | pred_std/true_std %.6f/%.6f"
+            ),
+            phase.title(),
+            epoch,
+            regression_stats["pred_true_corr"],
+            regression_stats["hi_true_corr"],
+            regression_stats["hi_pred_corr"],
+            regression_stats["pred_std"],
+            regression_stats["true_std"],
         )
         return regression_stats
 
@@ -571,9 +587,9 @@ class Trainer:
             self.logger.info(
                 (
                     "Epoch %03d/%03d | lr %.6f%s | train rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
-                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f | "
+                    "hi_sup %.6f hi_mono %.6f hi_var %.6f hi_smooth %.6f pred_corr_loss %.6f | "
                     "valid rmse %.4f mae %.4f bias %+.4f std_pen %.6f corr %.4f "
-                    "hi_sup %.6f hi_rank %.6f hi_var %.6f hi_smooth %.6f"
+                    "hi_sup %.6f hi_mono %.6f hi_var %.6f hi_smooth %.6f pred_corr_loss %.6f"
                 ),
                 epoch,
                 self.config.epochs,
@@ -585,18 +601,20 @@ class Trainer:
                 tr["train_std_penalty"],
                 tr["train_corr_value"],
                 tr["train_hi_supervision"],
-                tr["train_hi_rank"],
+                tr["train_hi_monotonic"],
                 tr["train_hi_var_penalty"],
                 tr["train_hi_smoothness"],
+                tr["train_pred_corr_loss"],
                 va["valid_rmse"],
                 va["valid_mae"],
                 va["valid_mean_bias"],
                 va["valid_std_penalty"],
                 va["valid_corr_value"],
                 va["valid_hi_supervision"],
-                va["valid_hi_rank"],
+                va["valid_hi_monotonic"],
                 va["valid_hi_var_penalty"],
                 va["valid_hi_smoothness"],
+                va["valid_pred_corr_loss"],
             )
             self.logger.info(
                 "Epoch %03d HI stats | train mean/std/min/max %.4f/%.4f/%.4f/%.4f | valid %.4f/%.4f/%.4f/%.4f",
@@ -694,11 +712,14 @@ class Trainer:
         metrics = {
             "rmse": regression_metrics["rmse"],
             "mae": regression_metrics["mae"],
+            "mse": regression_metrics["mse"],
             "r2": regression_metrics["r2"],
-            "mean_bias": regression_metrics["mean_bias"],
+            "mean_bias": regression_metrics["bias"],
+            "bias": regression_metrics["bias"],
+            "pearson_corr": regression_metrics["pearson_corr"],
             "pred_std": regression_metrics["pred_std"],
             "true_std": regression_metrics["true_std"],
-            "pred_true_std_ratio": regression_metrics["pred_std"] / max(regression_metrics["true_std"], 1e-8),
+            "pred_true_std_ratio": regression_metrics["pred_true_std_ratio"],
             "phm_score": result.phm_score,
             "best_epoch": self.best_epoch,
         }

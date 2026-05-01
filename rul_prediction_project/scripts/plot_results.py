@@ -100,10 +100,12 @@ def main() -> None:
         dropout=float(cfg["model"]["dropout"]),
         rul_head_mode=resolve_rul_head_mode(
             cfg["model"],
-            default="hi_guided_residual",
+            default="feature_only",
             checkpoint_variant=checkpoint_head_variant,
         ),
-        hi_residual_scale=float(cfg["model"].get("hi_residual_scale", 0.3)),
+        use_hi_auxiliary=bool(cfg["model"].get("use_hi_auxiliary", cfg["model"].get("use_hi", True))),
+        use_hi_in_rul_head=bool(cfg["model"].get("use_hi_in_rul_head", False)),
+        use_degradation_attention=bool(cfg["model"].get("use_degradation_attention", cfg["model"].get("use_attention", True))),
     )
     model = HybridRULModel(model_cfg)
     device = get_device()

@@ -80,6 +80,9 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         use_fixed_hi=bool(model_cfg_raw.get("use_fixed_hi", False)),
         hi_input_source=str(model_cfg_raw.get("hi_input_source", "tcn")),
         hi_output_temperature=float(model_cfg_raw.get("hi_output_temperature", 1.2)),
+        use_degradation_attention=bool(model_cfg_raw.get("use_degradation_attention", model_cfg_raw.get("use_attention", True))),
+        use_hi_auxiliary=bool(model_cfg_raw.get("use_hi_auxiliary", model_cfg_raw.get("use_hi", True))),
+        use_hi_in_rul_head=bool(model_cfg_raw.get("use_hi_in_rul_head", False)),
         use_attention=bool(model_cfg_raw.get("use_attention", True)),
         attention_use_hi_bias=bool(model_cfg_raw.get("attention_use_hi_bias", True)),
         attention_use_hi_logit=bool(model_cfg_raw.get("attention_use_hi_logit", True)),
@@ -90,8 +93,7 @@ def build_model_config(cfg: Dict, sensor_dim: int) -> ModelConfig:
         attention_temperature=float(model_cfg_raw.get("attention_temperature", 1.0)),
         attention_recency_strength=float(model_cfg_raw.get("attention_recency_strength", 0.5)),
         head_hidden_dim=int(model_cfg_raw.get("head_hidden_dim", 32)),
-        rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="hi_guided_residual"),
-        hi_residual_scale=float(model_cfg_raw.get("hi_residual_scale", 0.3)),
+        rul_head_mode=resolve_rul_head_mode(model_cfg_raw, default="feature_only"),
         output_activation=str(model_cfg_raw.get("output_activation", "identity")),
     )
 
@@ -131,13 +133,14 @@ def build_trainer_config(cfg: Dict) -> TrainerConfig:
         bias_regularization_weight=bias_weight,
         std_regularization_weight=float(train_cfg_raw.get("std_regularization_weight", 0.0)),
         correlation_regularization_weight=float(train_cfg_raw.get("correlation_regularization_weight", 0.0)),
+        pred_corr_weight=float(train_cfg_raw.get("pred_corr_weight", train_cfg_raw.get("corr_rul_weight", 0.2))),
+        negative_corr_weight=float(train_cfg_raw.get("negative_corr_weight", 0.5)),
         hi_supervision_weight=float(train_cfg_raw.get("hi_supervision_weight", 0.0)),
-        hi_rank_weight=float(train_cfg_raw.get("hi_rank_weight", 0.0)),
-        hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.03)),
-        hi_variance_floor=float(train_cfg_raw.get("hi_variance_floor", 0.08)),
-        hi_smoothness_weight=float(train_cfg_raw.get("hi_smoothness_weight", 0.01)),
-        residual_regularization_weight=float(train_cfg_raw.get("residual_regularization_weight", 0.0)),
-        hi_target_mode=str(train_cfg_raw.get("hi_target_mode", "degradation")),
+        hi_monotonic_weight=float(train_cfg_raw.get("hi_monotonic_weight", train_cfg_raw.get("hi_rank_weight", 0.02))),
+        hi_variance_weight=float(train_cfg_raw.get("hi_variance_weight", 0.1)),
+        hi_variance_floor=float(train_cfg_raw.get("min_hi_std_target", train_cfg_raw.get("hi_variance_floor", 0.03))),
+        hi_smoothness_weight=float(train_cfg_raw.get("hi_smooth_weight", train_cfg_raw.get("hi_smoothness_weight", 0.005))),
+        hi_target_mode=str(train_cfg_raw.get("hi_target_mode", "health")),
     )
 
 

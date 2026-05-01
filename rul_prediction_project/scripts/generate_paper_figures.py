@@ -1,17 +1,4 @@
-"""Generate publication-style figures for RUL prognostics paper artifacts.
-
-This script produces a consistent set of figures used in manuscript drafting:
-
-- model_architecture.png
-- health_indicator_curve.png
-- rul_prediction_curve.png
-- attention_heatmap.png
-- sensor_importance.png
-- ablation_results.png
-
-All files are saved under:
-    outputs/paper_figures/
-"""
+"""Generate paper artifact figures from evaluation outputs."""
 
 from __future__ import annotations
 
@@ -19,276 +6,130 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from matplotlib.patches import FancyBboxPatch
-from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.evaluator import evaluate_model, group_predictions_by_id
-from src.hybrid_rul_model import HybridRULModel, ModelConfig
-from src.checkpoint_compat import detect_checkpoint_head_variant, load_model_state_strict, resolve_rul_head_mode
-from src.preprocess import prepare_datasets
-from src.utils import configure_logging, ensure_project_paths, get_device, load_yaml, set_seed
+from src.utils import build_run_name, ensure_project_paths, load_yaml
 
 
-plt.style.use("seaborn-v0_8-whitegrid")
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Generate SCI paper artifact figures")
+    p.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
+    p.add_argument("--split", type=str, default="test", choices=["valid", "test"])
+    return p.parse_args()
+
+
+def _read_csv(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
 def _savefig(path: Path) -> None:
-    """Common save helper with directory creation and DPI control."""
-
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(path, dpi=220)
     plt.close()
 
 
-def draw_architecture_figure(path: Path) -> None:
-    """Draw a conceptual architecture block diagram using matplotlib patches."""
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.axis("off")
-
-    blocks = [
-        (0.02, 0.35, 0.14, 0.3, "Input\n(B,T,S)", "#dbeafe"),
-        (0.20, 0.35, 0.14, 0.3, "TCN", "#bfdbfe"),
-        (0.38, 0.35, 0.17, 0.3, "Transformer\nEncoder", "#93c5fd"),
-        (0.60, 0.35, 0.17, 0.3, "Degradation\nAttention", "#60a5fa"),
-        (0.80, 0.35, 0.16, 0.3, "Fusion +\nRUL Head", "#3b82f6"),
-    ]
-
-    hi_block = (0.38, 0.05, 0.17, 0.2, "HI Module", "#c4b5fd")
-
-    for x, y, w, h, label, color in blocks + [hi_block]:
-        patch = FancyBboxPatch(
-            (x, y),
-            w,
-            h,
-            boxstyle="round,pad=0.02,rounding_size=0.03",
-            linewidth=1.5,
-            edgecolor="#1f2937",
-            facecolor=color,
-        )
-        ax.add_patch(patch)
-        ax.text(x + w / 2, y + h / 2, label, ha="center", va="center", fontsize=11, fontweight="bold")
-
-    # Draw directed arrows between main blocks.
-    arrow_y = 0.50
-    for i in range(len(blocks) - 1):
-        x_start = blocks[i][0] + blocks[i][2]
-        x_end = blocks[i + 1][0]
-        ax.annotate("", xy=(x_end, arrow_y), xytext=(x_start, arrow_y), arrowprops=dict(arrowstyle="->", lw=2))
-
-    # Arrow from HI block to degradation attention and fusion.
-    ax.annotate("", xy=(0.68, 0.35), xytext=(0.47, 0.25), arrowprops=dict(arrowstyle="->", lw=2, color="#7c3aed"))
-    ax.annotate("", xy=(0.86, 0.35), xytext=(0.55, 0.15), arrowprops=dict(arrowstyle="->", lw=2, color="#7c3aed"))
-
-    ax.set_title("Hybrid RUL Model Architecture", fontsize=14, fontweight="bold")
-    _savefig(path)
-
-
-def plot_health_indicator_curve(hi: np.ndarray, path: Path) -> None:
-    """Plot global HI trajectory."""
-
-    plt.figure(figsize=(8, 4))
-    plt.plot(np.arange(len(hi)), hi, color="#7c3aed", linewidth=2)
-    plt.xlabel("Window Index")
-    plt.ylabel("Health Indicator")
-    plt.ylim(0, 1)
-    plt.title("Health Indicator Degradation Curve")
-    _savefig(path)
-
-
-def plot_rul_curve(y_true: np.ndarray, y_pred: np.ndarray, path: Path) -> None:
-    """Plot true vs predicted RUL curve."""
-
-    plt.figure(figsize=(10, 4.5))
-    x = np.arange(len(y_true))
-    plt.plot(x, y_true, label="True RUL", linewidth=2)
-    plt.plot(x, y_pred, label="Predicted RUL", linewidth=1.8, linestyle="--")
-    plt.xlabel("Window Index")
-    plt.ylabel("RUL")
-    plt.title("RUL Prediction Curve")
-    plt.legend()
-    _savefig(path)
-
-
-def plot_attention_heatmap(attn: np.ndarray, path: Path) -> None:
-    """Plot a modality attention heatmap.
-
-    Args:
-        attn: Attention matrix shape ``(M, M)``.
-    """
-
-    plt.figure(figsize=(5, 4.5))
-    im = plt.imshow(attn, cmap="viridis")
-    plt.colorbar(im, fraction=0.046, pad=0.04)
-    labels = ["Time", "Freq", "Deep", "HI"]
-    plt.xticks(np.arange(len(labels)), labels)
-    plt.yticks(np.arange(len(labels)), labels)
-    plt.title("Attention Heatmap")
-    _savefig(path)
-
-
-def plot_sensor_importance(frame: np.ndarray, path: Path) -> None:
-    """Plot average absolute signal per sensor as rough importance proxy."""
-
-    importance = np.mean(np.abs(frame), axis=0)
-    idx = np.arange(len(importance))
-
-    plt.figure(figsize=(9, 4.2))
-    plt.bar(idx, importance, color="#2563eb")
-    plt.xlabel("Sensor Index")
-    plt.ylabel("Importance (|signal| mean)")
-    plt.title("Sensor Importance")
-    _savefig(path)
-
-
-def load_benchmark_csv(path: Path) -> Optional[List[Dict[str, str]]]:
-    """Load benchmark CSV if available."""
-
-    if not path.exists():
-        return None
-
-    rows: List[Dict[str, str]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
-
-
-def plot_ablation_results(rows: Optional[List[Dict[str, str]]], path: Path) -> None:
-    """Plot benchmark-based ablation chart.
-
-    If benchmark file is absent, a placeholder synthetic chart is generated.
-    """
-
-    if not rows:
-        models = ["TCN", "TCN+Trans", "+Attn", "Full"]
-        rmse = [18.0, 14.5, 12.9, 11.4]
-    else:
-        models = [r["model"] for r in rows]
-        rmse = [float(r["rmse"]) for r in rows]
-
-    plt.figure(figsize=(8, 4.5))
-    plt.plot(models, rmse, marker="o", linewidth=2, color="#dc2626")
-    plt.ylabel("RMSE")
-    plt.xlabel("Model Variant")
-    plt.title("Ablation Results")
-    _savefig(path)
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse CLI args."""
-
-    parser = argparse.ArgumentParser(description="Generate paper figures")
-    parser.add_argument("--config", type=str, default=str(ROOT / "configs" / "config.yaml"))
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=str(ROOT / "outputs" / "checkpoints" / "best_model.pth"),
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
-    """Main workflow for figure generation."""
-
     args = parse_args()
     cfg = load_yaml(args.config)
     paths = ensure_project_paths(ROOT)
-    logger = configure_logging(paths["logs"] / "paper_figures.log")
 
-    seed = int(cfg["experiment"].get("seed", 42))
-    set_seed(seed)
-
-    fig_dir = paths["outputs"] / "paper_figures"
-    fig_dir.mkdir(parents=True, exist_ok=True)
-
-    draw_architecture_figure(fig_dir / "model_architecture.png")
-
-    prepared = prepare_datasets(
-        dataset_root=cfg["data"]["dataset_root"],
-        window_size=int(cfg["data"]["window_size"]),
-        stride=int(cfg["data"]["stride"]),
-        max_rul=int(cfg["data"]["max_rul"]),
-        valid_ratio=float(cfg["data"]["valid_ratio"]),
-        seed=seed,
+    run_name = build_run_name(
+        base_name=str(cfg["experiment"].get("name", "rul_experiment")),
+        seed=int(cfg["experiment"].get("seed", 42)),
+        suffix=str(cfg["experiment"].get("tag", "")) or None,
     )
+    run_paths = ensure_project_paths(ROOT, run_name=run_name)
+    eval_tables = run_paths["run_results"] / f"evaluation_{args.split}" / "tables"
+    eval_figures = run_paths["run_results"] / f"evaluation_{args.split}" / "figures"
 
-    device = get_device()
-    ckpt_path = Path(args.checkpoint)
-    payload = torch.load(ckpt_path, map_location=device) if ckpt_path.exists() else None
-    checkpoint_head_variant = (
-        detect_checkpoint_head_variant(payload["model_state"])
-        if payload is not None
-        else None
-    )
+    out_dir = run_paths["run_dir"] / "paper_artifacts" / "figures"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    model_cfg = ModelConfig(
-        sensor_dim=prepared.feature_dim,
-        tcn_channels=int(cfg["model"]["tcn_channels"]),
-        tcn_kernel_size=int(cfg["model"]["tcn_kernel_size"]),
-        tcn_dilations=tuple(cfg["model"]["tcn_dilations"]),
-        transformer_embed_dim=int(cfg["model"]["transformer_embed_dim"]),
-        transformer_heads=int(cfg["model"]["transformer_heads"]),
-        transformer_layers=int(cfg["model"]["transformer_layers"]),
-        transformer_ffn_dim=int(cfg["model"]["transformer_ffn_dim"]),
-        dropout=float(cfg["model"]["dropout"]),
-        rul_head_mode=resolve_rul_head_mode(
-            cfg["model"],
-            default="hi_guided_residual",
-            checkpoint_variant=checkpoint_head_variant,
-        ),
-        hi_residual_scale=float(cfg["model"].get("hi_residual_scale", 0.3)),
-    )
+    scatter_rows = _read_csv(eval_tables / "prediction_scatter_raw.csv")
+    grouped_rows = _read_csv(eval_tables / "grouped_metrics.csv")
 
-    model = HybridRULModel(model_cfg)
+    if not scatter_rows:
+        raise FileNotFoundError(f"Missing evaluation scatter table: {eval_tables / 'prediction_scatter_raw.csv'}")
 
-    if payload is not None:
-        if checkpoint_head_variant is not None:
-            logger.info("Checkpoint head variant detected: %s", checkpoint_head_variant)
-        load_model_state_strict(model, payload)
-        logger.info("Loaded checkpoint for figure generation")
-    else:
-        logger.warning("Checkpoint not found. Figures based on random-initialized model outputs.")
+    y_true = np.asarray([float(r["true_rul_raw"]) for r in scatter_rows], dtype=np.float32)
+    y_pred = np.asarray([float(r["pred_rul_raw"]) for r in scatter_rows], dtype=np.float32)
+    hi = np.asarray([float(r["health_indicator"]) for r in scatter_rows], dtype=np.float32)
+    groups = [r["group"] for r in scatter_rows]
 
-    model = model.to(device)
-    loader = DataLoader(prepared.test_dataset, batch_size=int(cfg["train"]["batch_size"]), shuffle=False)
-    result = evaluate_model(model, loader, device)
+    # 1) predicted vs true curve per bearing
+    unique_groups = []
+    for g in groups:
+        if g not in unique_groups:
+            unique_groups.append(g)
+    for g in unique_groups:
+        idx = [i for i, gg in enumerate(groups) if gg == g]
+        plt.figure(figsize=(9, 4))
+        plt.plot(y_true[idx], label="true", linewidth=2)
+        plt.plot(y_pred[idx], label="pred", linestyle="--", linewidth=1.8)
+        plt.title(f"Pred vs True RUL | {g}")
+        plt.xlabel("window index")
+        plt.ylabel("RUL (raw)")
+        plt.legend()
+        _savefig(out_dir / f"rul_curve_{g}.png")
 
-    plot_health_indicator_curve(result.hi, fig_dir / "health_indicator_curve.png")
-    plot_rul_curve(result.y_true, result.y_pred, fig_dir / "rul_prediction_curve.png")
+    # 2) pred vs true scatter
+    plt.figure(figsize=(5, 5))
+    plt.scatter(y_true, y_pred, s=8, alpha=0.5)
+    lim_min = float(min(np.min(y_true), np.min(y_pred)))
+    lim_max = float(max(np.max(y_true), np.max(y_pred)))
+    plt.plot([lim_min, lim_max], [lim_min, lim_max], "r--", linewidth=1)
+    plt.xlabel("true RUL (raw)")
+    plt.ylabel("pred RUL (raw)")
+    plt.title("Pred vs True Scatter")
+    _savefig(out_dir / "pred_vs_true_scatter.png")
 
-    # Attention heatmap: if no attention maps persisted, synthesize a plausible matrix.
-    # This preserves script robustness in minimal environments.
-    attn = np.array(
-        [
-            [0.42, 0.20, 0.28, 0.10],
-            [0.18, 0.37, 0.33, 0.12],
-            [0.24, 0.29, 0.35, 0.12],
-            [0.15, 0.22, 0.28, 0.35],
-        ],
-        dtype=np.float32,
-    )
-    plot_attention_heatmap(attn, fig_dir / "attention_heatmap.png")
+    # 3) HI curve per bearing
+    for g in unique_groups:
+        idx = [i for i, gg in enumerate(groups) if gg == g]
+        plt.figure(figsize=(9, 3.5))
+        plt.plot(hi[idx], color="#7c3aed")
+        plt.xlabel("window index")
+        plt.ylabel("HI")
+        plt.title(f"HI curve | {g}")
+        _savefig(out_dir / f"hi_curve_{g}.png")
 
-    # Sensor importance proxy from a sample batch.
-    sample = prepared.test_dataset[0]["x"].numpy()
-    plot_sensor_importance(sample, fig_dir / "sensor_importance.png")
+    # 4) attention mean heatmap (copied from evaluation output if present)
+    attn_fig = eval_figures / "attention_heatmap_mean.png"
+    if attn_fig.exists():
+        import shutil
 
-    benchmark_rows = load_benchmark_csv(paths["outputs"] / "results" / "benchmark_results.csv")
-    plot_ablation_results(benchmark_rows, fig_dir / "ablation_results.png")
+        shutil.copy2(attn_fig, out_dir / "attention_mean_heatmap.png")
 
-    logger.info("Paper figures generated under %s", fig_dir)
+    # 5) training/validation loss curve (copied)
+    train_curve = run_paths["run_figures"] / "training_loss_curve.png"
+    if train_curve.exists():
+        import shutil
+
+        shutil.copy2(train_curve, out_dir / "training_validation_loss_curve.png")
+
+    # 6) per-bearing RMSE bar chart
+    if grouped_rows:
+        labels = [r["group"] for r in grouped_rows]
+        rmse = [float(r["rmse_raw"]) if r.get("rmse_raw") else float(r["rmse"]) for r in grouped_rows]
+        plt.figure(figsize=(10, 4))
+        plt.bar(labels, rmse, color="#2563eb")
+        plt.xticks(rotation=25, ha="right")
+        plt.ylabel("RMSE (raw)")
+        plt.title("Per-bearing RMSE")
+        _savefig(out_dir / "per_bearing_rmse_bar.png")
+
+    print(f"Saved paper figures to {out_dir}")
 
 
 if __name__ == "__main__":
